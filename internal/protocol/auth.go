@@ -9,8 +9,12 @@ import (
 )
 
 // AuthKind classifies a rejected /vpn/user/auth/password result.
-// Password expiry is separate from a wrong username or password: gateways
-// reuse 0x8000001A for both, and the Chinese message is what distinguishes them.
+//
+// Only result code 0x100 means "password expired": SecUI.exe branches on that
+// code alone when it opens the password-change view. A gateway can also answer
+// 0x8000001A (ciphertext parse failure) with an "expired" sentence in msg, but
+// that is still a credential error, so message text must never trigger the
+// change-password flow.
 type AuthKind int
 
 const (
@@ -21,9 +25,15 @@ const (
 )
 
 const (
-	codeBadCredentials  = 0x8000001A
+	// codePasswordExpired is the only result that opens the password-change view.
 	codePasswordExpired = 0x100
-	codeVerifyCode      = 0x66600011
+	// codeBadCredentials is a real username/password mismatch.
+	codeBadCredentials = 0x101
+	// codeDecryptFailed means the gateway could not parse the encrypted
+	// credentials (for example encode=1 was sent instead of encode=2). The
+	// original client still reports it as a credential error.
+	codeDecryptFailed = 0x8000001A
+	codeVerifyCode    = 0x66600011
 )
 
 // AuthError is a gateway authentication rejection with a stable kind.
@@ -43,11 +53,13 @@ func (e *AuthError) Error() string {
 		if msg == "" {
 			msg = "账号口令已过期，需要修改密码"
 		}
-		// Leading "口令过期" is the marker the UI and CLI look for.
-		// Do not rewrite this into the bad-credentials sentence.
+		// Keep a leading "口令过期" for readable logs; callers use
+		// IsPasswordExpired rather than matching this text.
 		return fmt.Sprintf("口令过期: %s (错误代码: %s)", msg, displayCode(e.Code))
 	case AuthKindBadCredentials:
-		if msg == "" {
+		// Match the original client's error mapping: both a real mismatch and
+		// a ciphertext parse failure are shown as an account/password error.
+		if msg == "" || isResultCode(e.Code, codeBadCredentials) || isResultCode(e.Code, codeDecryptFailed) {
 			msg = "用户名或密码错误"
 		}
 		return fmt.Sprintf("登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
@@ -87,38 +99,31 @@ func newAuthError(code, msg string) *AuthError {
 
 func classifyAuth(code, msg string) AuthKind {
 	n, ok := parseResultCode(code)
-	if passwordExpired(n, ok, msg) {
-		return AuthKindPasswordExpired
+	if ok {
+		switch n {
+		case codePasswordExpired:
+			return AuthKindPasswordExpired
+		case codeBadCredentials, codeDecryptFailed:
+			return AuthKindBadCredentials
+		case codeVerifyCode:
+			return AuthKindVerifyCode
+		}
 	}
-	if (ok && n == codeBadCredentials) || containsAny(msg, "用户名或密码错误", "用户名或口令错误", "用户名密码错误") {
+
+	// Message fallback for responses without a usable code. It may classify a
+	// credential error, but never a password expiry.
+	if containsAny(msg, "用户名或密码错误", "用户名或口令错误", "用户名密码错误") {
 		return AuthKindBadCredentials
 	}
-	if (ok && n == codeVerifyCode) || strings.Contains(msg, "验证码") {
+	if strings.Contains(msg, "验证码") {
 		return AuthKindVerifyCode
 	}
 	return AuthKindOther
 }
 
-func passwordExpired(code uint64, hasCode bool, msg string) bool {
-	if hasCode && code == codePasswordExpired {
-		return true
-	}
-	return containsAny(msg,
-		"口令过期",
-		"密码过期",
-		"口令已过期",
-		"密码已过期",
-		"口令到期",
-		"密码到期",
-		"请修改密码",
-		"请修改口令",
-		"强制修改密码",
-		"强制修改口令",
-		"首次登录修改",
-		"首次登陆修改",
-		"password expired",
-		"must change password",
-	)
+func isResultCode(code string, want uint64) bool {
+	n, ok := parseResultCode(code)
+	return ok && n == want
 }
 
 func containsAny(msg string, parts ...string) bool {

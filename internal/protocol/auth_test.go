@@ -17,9 +17,13 @@ func TestClassifyAuth(t *testing.T) {
 		kind AuthKind
 	}{
 		{"0x8000001A", "用户名或密码错误", AuthKindBadCredentials},
-		{"0x8000001A", "口令已过期，请修改密码", AuthKindPasswordExpired},
+		{"0x8000001A", "口令已过期，请修改密码", AuthKindBadCredentials},
+		{"0x101", "用户名或密码错误", AuthKindBadCredentials},
+		{"257", "", AuthKindBadCredentials},
 		{"0x00000100", "用户名或密码错误", AuthKindPasswordExpired},
 		{"256", "请修改口令", AuthKindPasswordExpired},
+		{"", "口令已过期，请修改密码", AuthKindOther},
+		{"", "用户名或密码错误", AuthKindBadCredentials},
 		{"0x66600011", "请输入验证码", AuthKindVerifyCode},
 		{"0x80000013", "用户被锁定", AuthKindOther},
 	}
@@ -29,7 +33,7 @@ func TestClassifyAuth(t *testing.T) {
 		}
 	}
 
-	expired := newAuthError("0x8000001A", "口令已过期，请修改密码")
+	expired := newAuthError("0x100", "口令过期，需修改密码")
 	if !IsPasswordExpired(expired) {
 		t.Fatal("expected password-expired error")
 	}
@@ -44,29 +48,66 @@ func TestClassifyAuth(t *testing.T) {
 	if IsPasswordExpired(bad) {
 		t.Fatal("wrong password classified as expired")
 	}
+
+	// A ciphertext parse failure with an expiry-sounding message is still a
+	// credential error and must be displayed as one.
+	decryptFailed := newAuthError("0x8000001A", "口令已过期，请修改密码")
+	if IsPasswordExpired(decryptFailed) {
+		t.Fatal("ciphertext parse failure classified as expired")
+	}
+	if strings.Contains(decryptFailed.Error(), "口令过期") {
+		t.Fatalf("decrypt failure leaked an expiry message: %s", decryptFailed.Error())
+	}
+	if !strings.Contains(decryptFailed.Error(), "用户名或密码错误") {
+		t.Fatalf("decrypt failure not shown as bad credentials: %s", decryptFailed.Error())
+	}
 }
 
-func TestLoginDistinguishesExpiredGBKFromBadCredentials(t *testing.T) {
-	msg, err := simplifiedchinese.GBK.NewEncoder().String("口令已过期，请修改密码")
+func TestLoginClassifiesPasswordExpiryByResultCode(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        string
+		msg         string
+		expired     bool
+		wantMessage string
+	}{
+		{"0x100 opens change password", "0x100", "口令过期，需修改密码", true, "口令过期"},
+		{"0x8000001A stays bad credentials", "0x8000001A", "口令已过期，请修改密码", false, "用户名或密码错误"},
+		{"0x101 stays bad credentials", "0x101", "口令已过期，请修改密码", false, "用户名或密码错误"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := gbkAuthResponse(t, tc.code, tc.msg)
+
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/xml; charset=gb2312")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			client := testClient(t, srv)
+			_, err := client.Login("alice", "old-secret", "")
+			if err == nil {
+				t.Fatal("expected login rejection")
+			}
+			if got := IsPasswordExpired(err); got != tc.expired {
+				t.Fatalf("IsPasswordExpired = %v, want %v (err: %v)", got, tc.expired, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("expected %q in error, got %v", tc.wantMessage, err)
+			}
+		})
+	}
+}
+
+func gbkAuthResponse(t *testing.T, code, msg string) string {
+	t.Helper()
+	encoded, err := simplifiedchinese.GBK.NewEncoder().String(msg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := `<?xml version="1.0" encoding="gb2312"?><RESPONSE><RESULT code="0x8000001A" msg="` + msg + `"/></RESPONSE>`
-
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/xml; charset=gb2312")
-		_, _ = io.WriteString(w, body)
-	}))
-	defer srv.Close()
-
-	client := testClient(t, srv)
-	_, err = client.Login("alice", "old-secret", "")
-	if !IsPasswordExpired(err) {
-		t.Fatalf("expected password expired, got %v", err)
-	}
-	if strings.Contains(err.Error(), "用户名或密码错误") {
-		t.Fatalf("GBK expiry was shown as bad credentials: %v", err)
-	}
+	return `<?xml version="1.0" encoding="gb2312"?><RESPONSE><RESULT code="` + code + `" msg="` + encoded + `"/></RESPONSE>`
 }
 
 func TestLoginBadCredentialsStayBadCredentials(t *testing.T) {
@@ -136,6 +177,38 @@ func TestChangePasswordHandlesGatewayErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "旧密码错误") && !strings.Contains(err.Error(), "0x11A") {
 		t.Fatalf("expected error message to contain reason or code: %v", err)
+	}
+}
+
+func TestChangePasswordRequiresSuccessResultCode(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"missing result code", `<RESPONSE></RESPONSE>`, "缺少结果码"},
+		{"non-XML body", `<html><body>ok</body></html>`, "无法解析"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/vpn/user/auth/pwdchange", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			})
+
+			srv := httptest.NewTLSServer(mux)
+			defer srv.Close()
+
+			client := testClient(t, srv)
+			err := client.ChangePassword("alice", "old-secret", "new-secret", "")
+			if err == nil {
+				t.Fatal("HTTP 200 without a success result code was treated as success")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

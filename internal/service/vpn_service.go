@@ -14,20 +14,31 @@ import (
 	"github.com/hygkui/v5vpn-rea-client/internal/proxy"
 )
 
+// passwordChallenge retains the HTTP client that received a 0x100 login
+// challenge. /vpn/user/auth/pwdchange must reuse it so the VSG_SESSIONID
+// cookie issued by that response is sent with the change request.
+type passwordChallenge struct {
+	client      *protocol.Client
+	gatewayIP   string
+	gatewayPort int
+	username    string
+}
+
 // VPNService is the backend service exposed to the MyGo frontend
 type VPNService struct {
-	Config         *config.AppConfig
-	Client         *protocol.Client
-	ProxyMgr       *proxy.ProxyManager
-	Status         string // "Disconnected", "Connecting", "Connected", "Error"
-	StatusDetail   string
-	Resources      []protocol.VPNResource
-	Logs           []string
-	OnStatusChange func(string)
-	appVersion     string
-	mu             sync.Mutex
-	logMu          sync.Mutex
-	onLog          func(string)
+	Config            *config.AppConfig
+	Client            *protocol.Client
+	ProxyMgr          *proxy.ProxyManager
+	Status            string // "Disconnected", "Connecting", "Connected", "Error"
+	StatusDetail      string
+	Resources         []protocol.VPNResource
+	Logs              []string
+	OnStatusChange    func(string)
+	appVersion        string
+	passwordChallenge *passwordChallenge
+	mu                sync.Mutex
+	logMu             sync.Mutex
+	onLog             func(string)
 }
 
 // NewVPNService initializes the VPN service with loaded settings
@@ -239,6 +250,8 @@ func (s *VPNService) Login(gwIdentifier, username, password, verifycode string, 
 	gwPort := gw.Port
 	gwAlgo := gw.Algo
 	s.Config.LastUseGateway = gw.Name
+	// A fresh authentication attempt supersedes any previous challenge.
+	s.passwordChallenge = nil
 
 	if remember {
 		s.storeAccountLocked(gw, username, password, remember, auto)
@@ -260,6 +273,18 @@ func (s *VPNService) Login(gwIdentifier, username, password, verifycode string, 
 
 	// Step 2: Authenticate
 	if _, err = client.Login(username, password, verifycode); err != nil {
+		if protocol.IsPasswordExpired(err) {
+			// Keep this client so ChangePassword can reuse its jar and send
+			// the VSG_SESSIONID issued with the 0x100 response.
+			s.mu.Lock()
+			s.passwordChallenge = &passwordChallenge{
+				client:      client,
+				gatewayIP:   gwIP,
+				gatewayPort: gwPort,
+				username:    username,
+			}
+			s.mu.Unlock()
+		}
 		s.setStatus("Error", fmt.Sprintf("认证失败: %v", err))
 		return nil, err
 	}
@@ -300,9 +325,16 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 
 	s.mu.Lock()
 	client := s.Client
+	challenge := s.passwordChallenge
 	s.mu.Unlock()
 
-	if client == nil || client.GatewayIP != gwIP {
+	// Reuse the HTTP client that received the 0x100 challenge when it belongs
+	// to this gateway and user; its cookie jar carries VSG_SESSIONID.
+	if challenge != nil && challenge.username == username &&
+		challenge.gatewayIP == gwIP && challenge.gatewayPort == gwPort {
+		client = challenge.client
+	}
+	if client == nil || client.GatewayIP != gwIP || client.GatewayPort != gwPort {
 		client = protocol.NewClient(gwIP, gwPort, gwAlgo, s.Log)
 		if _, err := client.Handshake(); err != nil {
 			s.setStatus("Error", fmt.Sprintf("Handshake failed: %v", err))
@@ -315,6 +347,9 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 	}
 
 	s.mu.Lock()
+	if s.passwordChallenge != nil && s.passwordChallenge.client == client {
+		s.passwordChallenge = nil
+	}
 	s.Status = "Disconnected"
 	s.StatusDetail = "密码已更新，正在登录"
 	s.mu.Unlock()
@@ -389,6 +424,7 @@ func (s *VPNService) Logout() (bool, error) {
 	client := s.Client
 	s.ProxyMgr = nil
 	s.Client = nil
+	s.passwordChallenge = nil
 	s.Status = "Disconnected"
 	s.StatusDetail = "Disconnected"
 	s.Resources = nil

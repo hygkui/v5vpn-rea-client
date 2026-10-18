@@ -52,10 +52,12 @@
      - `encode=1`：v1.0 旧版网关模式，仅对明文口令做 Base64 编码。
    - 字段：`username={EncUser}&password={EncPwd}&encode=2&verifycode={code}`。
    - 登录成功返回 Session Cookie：`VSG_SESSIONID`。
-   - **口令过期识别**：结果码 `0x00000100`（十进制 256），或提示语包含「口令过期 / 密码已过期 / 请修改密码」。网关有时返回 `0x8000001A` 但提示正文为口令过期（若响应为 GBK 编码，客户端会自动转换为 UTF-8 进行解析判断）。
+   - **口令过期识别**：仅以网关结果码 `0x00000100`（十进制 256）为准，与原厂 `SecUI.exe` 的 `cmp eax, 0x100` 分支一致。`0x101`（用户名或口令不匹配）和 `0x8000001A`（密文解析失败）都按账号密码错误处理，即使响应文案提到「口令过期」也不会进入改密流程。若响应为 GBK 编码，客户端会自动转换为 UTF-8 再解析。
 3. **口令修改**：`POST /vpn/user/auth/pwdchange`
+   - 复用收到 `0x100` 登录响应的同一 HTTP 客户端，携带该响应下发的 `VSG_SESSIONID` Cookie。
    - 字段：`old_pwd={Base64(OldPwd)}&new_pwd={Base64(NewPwd)}&encode=1`。
-   - 密码采用标准 Base64 编码，`encode=1` 指示网关使用 Base64 解码。修改成功后，客户端自动使用新密码完成登录并建立隧道。
+   - 密码采用标准 Base64 编码，`encode=1` 指示网关使用 Base64 解码。只有解析到明确的成功结果码 `0` 才算修改成功；HTTP 200 但缺少结果码或 XML 无法解析均按失败处理。
+   - 修改成功后，客户端自动使用新密码完成登录并建立隧道。
 4. **获取授权资源**：`GET /vpn/user/portal/intergration.xml?version=2.0`
    - 获得 TCP/UDP 内网资源列表与端口、策略及 DNS。
 5. **隧道建立与数据透传**：

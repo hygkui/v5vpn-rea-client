@@ -442,9 +442,10 @@
   }
 
   function isPasswordExpired(err) {
-    if (err && err.code === 'password_expired') return true;
-    const msg = (err && err.message) || '';
-    return /口令过期|密码过期|口令已过期|密码已过期|口令到期|密码到期|请修改密码|请修改口令|0x0*100\b|password expired/i.test(msg);
+    // Only the backend's 0x100 challenge may open the change-password panel.
+    // A 0x8000001A response can carry an "expired" sentence in its msg but is
+    // still a credential error.
+    return !!(err && err.code === 'password_expired');
   }
 
   function friendlyLoginError(err) {
@@ -452,7 +453,7 @@
     if (isPasswordExpired(err)) {
       return '网关提示：账号口令已过期，请在下方设置新密码。';
     }
-    if (msg.includes('0x8000001A') || msg.includes('用户名或密码错误')) {
+    if (msg.includes('0x8000001A') || msg.includes('0x101') || msg.includes('用户名或密码错误')) {
       return '网关提示：用户名或密码错误，请检查输入的账号或密码！';
     }
     return msg;

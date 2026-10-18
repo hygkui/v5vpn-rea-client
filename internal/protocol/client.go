@@ -123,6 +123,11 @@ func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode s
 
 	c.Logger("INFO", "Submitting password change for user: %s", username)
 
+	// The 0x100 login challenge may have set VSG_SESSIONID. Refresh it from
+	// the jar so the change request carries the same session as the original
+	// client.
+	c.captureSession()
+
 	changeBody := passwordChangeBody(oldPassword, newPassword)
 	changeURL := fmt.Sprintf("%s/vpn/user/auth/pwdchange", c.BaseURL)
 
@@ -132,7 +137,9 @@ func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode s
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "LeadSec VPN Client")
-	if c.SessionCookie != "" {
+	// A non-nil jar attaches VSG_SESSIONID itself; setting the header too
+	// would make Go send the same cookie twice.
+	if c.HTTPClient.Jar == nil && c.SessionCookie != "" {
 		req.Header.Set("Cookie", c.SessionCookie)
 	}
 
@@ -143,23 +150,36 @@ func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode s
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("读取修改密码响应失败: %w", readErr)
+	}
 	respBody = prepareGatewayXML(respBody)
 	c.Logger("INFO", "Password change response status: %s", resp.Status)
 
 	var authResp AuthResponse
-	if err := xml.Unmarshal(respBody, &authResp); err != nil {
+	parseErr := xml.Unmarshal(respBody, &authResp)
+	if parseErr != nil {
 		c.Logger("WARN", "Password change response was not XML: %s", string(respBody))
 	}
+	resultCode := strings.TrimSpace(authResp.Result.Code)
 
-	if authResp.Result.Code != "" && !isSuccessCode(authResp.Result.Code) {
-		authErr := newAuthError(authResp.Result.Code, authResp.Result.Msg)
+	// A gateway error is authoritative even when it arrives with a non-200
+	// status, so surface it before the HTTP status check.
+	if parseErr == nil && resultCode != "" && !isSuccessCode(resultCode) {
+		authErr := newAuthError(resultCode, authResp.Result.Msg)
 		c.Logger("ERROR", "Gateway rejected password change: %s", authErr.Error())
 		return authErr
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("password change failed with HTTP status %d: %s", resp.StatusCode, string(respBody))
+	}
+	if parseErr != nil {
+		return fmt.Errorf("修改密码响应无法解析: %w", parseErr)
+	}
+	if resultCode == "" {
+		return fmt.Errorf("修改密码响应缺少结果码，无法确认修改成功")
 	}
 
 	c.captureSession()

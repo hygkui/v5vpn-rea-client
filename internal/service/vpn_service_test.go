@@ -1,10 +1,19 @@
 package service
 
 import (
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hygkui/v5vpn-rea-client/internal/config"
 )
 
 func TestVPNService_LogoutNoDeadlock(t *testing.T) {
@@ -115,4 +124,103 @@ func TestVPNService_LoginGateway2(t *testing.T) {
 
 	s.Logout()
 	time.Sleep(50 * time.Millisecond)
+}
+
+// TestChangePasswordReusesExpiredLoginClient verifies that the HTTP client
+// which received the 0x100 challenge is reused for /vpn/user/auth/pwdchange,
+// so the VSG_SESSIONID cookie from that response is sent with the request
+// instead of being lost with the failed login.
+func TestChangePasswordReusesExpiredLoginClient(t *testing.T) {
+	var (
+		mu            sync.Mutex
+		handshakes    int
+		loginCalls    int
+		pwdCookie     string
+		pwdHandshakes int
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vpn/version.xml", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		handshakes++
+		mu.Unlock()
+		_, _ = io.WriteString(w, `<VERSION major="2" minor="0"/>`)
+	})
+	mux.HandleFunc("/vpn/user/auth/password", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		loginCalls++
+		call := loginCalls
+		mu.Unlock()
+
+		if call == 1 {
+			http.SetCookie(w, &http.Cookie{Name: "VSG_SESSIONID", Value: "challenge-session", Path: "/"})
+			_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0x100" msg="口令过期，需修改密码"/></RESPONSE>`)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "VSG_SESSIONID", Value: "logged-in-session", Path: "/"})
+		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0"/></RESPONSE>`)
+	})
+	mux.HandleFunc("/vpn/user/auth/pwdchange", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pwdCookie = r.Header.Get("Cookie")
+		pwdHandshakes = handshakes
+		mu.Unlock()
+		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0" msg="密码修改成功"/></RESPONSE>`)
+	})
+	mux.HandleFunc("/vpn/user/portal/intergration.xml", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<INTERGRATION_INFO><USER name="alice"/><SESSION detect_interval="180"/><RESOURCE_LIST></RESOURCE_LIST></INTERGRATION_INFO>`)
+	})
+
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewVPNService(nil)
+	s.Config = &config.AppConfig{
+		Gateways: []config.GatewayProfile{{
+			ID:   "gw-test",
+			Name: "gw-test",
+			IP:   host,
+			Port: port,
+		}},
+	}
+	defer s.Logout()
+
+	if _, err := s.Login("gw-test", "alice", "old-secret", "", false, false); !IsPasswordExpired(err) {
+		t.Fatalf("expected expired login challenge, got %v", err)
+	}
+
+	res, err := s.ChangePassword("gw-test", "alice", "old-secret", "new-secret", "", false, false)
+	if err != nil {
+		t.Fatalf("change password failed: %v", err)
+	}
+	if res["status"] != "Connected" {
+		t.Fatalf("expected Connected after password change, got %v", res["status"])
+	}
+
+	mu.Lock()
+	gotCookie, gotHandshakes := pwdCookie, pwdHandshakes
+	mu.Unlock()
+
+	if gotHandshakes != 1 {
+		t.Fatalf("pwdchange should reuse the challenged client (1 handshake), saw %d", gotHandshakes)
+	}
+	if !strings.Contains(gotCookie, "VSG_SESSIONID=challenge-session") {
+		t.Fatalf("pwdchange did not carry the challenge session cookie: %q", gotCookie)
+	}
+	if strings.Count(gotCookie, "VSG_SESSIONID=") != 1 {
+		t.Fatalf("pwdchange sent duplicate session cookies: %q", gotCookie)
+	}
 }

@@ -33,5 +33,8 @@ func TestGateway1PasswordExpiredDetection(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Expected password expired error, got success")
 	}
+	if !IsPasswordExpired(err) {
+		t.Fatalf("Expected password expired error, got %v", err)
+	}
 	t.Logf("Expected error caught correctly: %v", err)
 }
