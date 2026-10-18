@@ -39,6 +39,7 @@ func main() {
 	connectGW := flag.String("connect", "", "Connect to gateway by name or IP in CLI mode")
 	userFlag := flag.String("user", "", "Username for CLI connection (defaults to remembered user)")
 	pwdFlag := flag.String("pwd", "", "Password for CLI connection (defaults to remembered password)")
+	newPwdFlag := flag.String("new-pwd", "", "New password when the gateway requires a password change")
 	httpPort := flag.Int("port", 0, "Serve web UI on custom HTTP port (0 for auto)")
 	flag.Parse()
 
@@ -64,7 +65,7 @@ func main() {
 
 	// CLI Connect Mode
 	if *cliMode && *connectGW != "" {
-		runCLIConnect(vpnService, *connectGW, *userFlag, *pwdFlag)
+		runCLIConnect(vpnService, *connectGW, *userFlag, *pwdFlag, *newPwdFlag)
 		return
 	}
 
@@ -423,13 +424,29 @@ func startHTTPServer(port int, uiFS fs.FS, vpnService *service.VPNService) int {
 		}
 
 		res, err := vpnService.Login(req.GWID, req.Username, req.Password, req.VerifyCode, req.Remember, req.Auto)
-		w.Header().Set("Content-Type", "application/json")
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeLoginResult(w, res, err)
+	})
+
+	mux.HandleFunc("/api/change-password", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(res)
+		var req struct {
+			GWID        string `json:"gwId"`
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			NewPassword string `json:"newPassword"`
+			VerifyCode  string `json:"verifycode"`
+			Remember    bool   `json:"remember"`
+			Auto        bool   `json:"auto"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := vpnService.ChangePassword(req.GWID, req.Username, req.Password, req.NewPassword, req.VerifyCode, req.Remember, req.Auto)
+		writeLoginResult(w, res, err)
 	})
 
 	mux.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) {
@@ -568,7 +585,25 @@ func runCLIList(svc *service.VPNService) {
 	}
 }
 
-func runCLIConnect(svc *service.VPNService, gwName, user, pwd string) {
+func writeLoginResult(w http.ResponseWriter, res map[string]any, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		if service.IsPasswordExpired(err) {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": err.Error(),
+				"code":  "password_expired",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string) {
 	gw := svc.Config.FindGateway(gwName)
 	if gw == nil {
 		fmt.Fprintf(os.Stderr, "未找到网关: %s\n", gwName)
@@ -588,9 +623,20 @@ func runCLIConnect(svc *service.VPNService, gwName, user, pwd string) {
 	}
 
 	fmt.Printf("正在连接网关 %s (%s:%d), 用户: %s...\n", gw.Name, gw.IP, gw.Port, user)
-	res, err := svc.Login(gw.Name, user, pwd, "", true, false)
+	var (
+		res map[string]any
+		err error
+	)
+	if newPwd != "" {
+		res, err = svc.ChangePassword(gw.Name, user, pwd, newPwd, "", true, false)
+	} else {
+		res, err = svc.Login(gw.Name, user, pwd, "", true, false)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "连接失败: %v\n", err)
+		if service.IsPasswordExpired(err) {
+			fmt.Fprintln(os.Stderr, "口令已过期。请加上 -new-pwd <新密码> 后重试，或在图形界面中修改密码。")
+		}
 		os.Exit(1)
 	}
 

@@ -48,6 +48,31 @@ body {
   width: 100vw;
   background: radial-gradient(circle at 50% 30%, #162444 0%, #0b1120 70%);
   padding: 20px;
+  overflow-y: auto;
+}
+
+.password-change-panel {
+  margin-top: 14px;
+  padding: 12px 14px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.password-change-hint {
+  font-size: 0.82rem;
+  color: #fcd34d;
+  margin-bottom: 12px;
+  line-height: 1.45;
+}
+
+.password-change-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.password-change-actions .btn {
+  flex: 1;
 }
 
 .login-wrapper {

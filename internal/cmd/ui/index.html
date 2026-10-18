@@ -82,6 +82,23 @@
               <span id="connect-btn-text">立即连接</span>
             </button>
           </div>
+
+          <!-- 口令过期：在当前客户端改密，而不是只报账密错误 -->
+          <div id="password-change-panel" class="password-change-panel" style="display: none;">
+            <p class="password-change-hint">网关要求先修改已过期的登录密码。修改成功后会用新密码继续连接。</p>
+            <div class="form-group">
+              <label for="new-password-input">新密码：</label>
+              <input type="password" id="new-password-input" class="form-control" placeholder="请输入新密码" autocomplete="new-password">
+            </div>
+            <div class="form-group">
+              <label for="confirm-password-input">确认新密码：</label>
+              <input type="password" id="confirm-password-input" class="form-control" placeholder="再次输入新密码" autocomplete="new-password">
+            </div>
+            <div class="password-change-actions">
+              <button type="button" id="change-password-btn" class="btn btn-primary">修改密码并连接</button>
+              <button type="button" id="cancel-change-password-btn" class="btn btn-secondary">返回</button>
+            </div>
+          </div>
         </form>
 
         <div class="login-footer">

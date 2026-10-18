@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,14 +101,41 @@ func (c *Client) Handshake() (*VersionResponse, error) {
 	return &v, nil
 }
 
-// Login authenticates user with gateway using AES-128-CBC encrypted credentials
+// Login authenticates user with gateway using AES-128-CBC encrypted credentials.
 func (c *Client) Login(username, password, verifycode string) (*IntegrationInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.authenticate(username, password, verifycode, "")
+}
 
-	c.Logger("INFO", "Initiating password authentication for user: %s", username)
+// ChangePassword submits the current password and a new one on the password
+// auth form. A successful change that also issues VSG_SESSIONID finishes
+// login on this client. A success code without a session means the gateway
+// stored the new password and the caller should log in again.
+func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode string) error {
+	if strings.TrimSpace(newPassword) == "" {
+		return fmt.Errorf("新密码不能为空")
+	}
+	if newPassword == oldPassword {
+		return fmt.Errorf("新密码不能与当前密码相同")
+	}
 
-	// Encrypt username and password using AES-128-CBC
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.authenticate(username, oldPassword, verifycode, newPassword)
+	return err
+}
+
+// authenticate posts /vpn/user/auth/password. newPassword empty is a normal
+// login; a non-empty value adds the change-password field. Caller holds c.mu.
+func (c *Client) authenticate(username, password, verifycode, newPassword string) (*IntegrationInfo, error) {
+	changing := newPassword != ""
+	if changing {
+		c.Logger("INFO", "Submitting password change for user: %s", username)
+	} else {
+		c.Logger("INFO", "Initiating password authentication for user: %s", username)
+	}
+
 	encUser, err := crypto.EncryptAuthParam(username)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt username: %w", err)
@@ -119,66 +145,44 @@ func (c *Client) Login(username, password, verifycode string) (*IntegrationInfo,
 		return nil, fmt.Errorf("failed to encrypt password: %w", err)
 	}
 
-	// In V5VPN protocol (SecController.dll), for version >= 1.0 (such as version 2.0 gateways),
-	// credentials are encrypted using AES-128-CBC and encode parameter MUST be "2".
-	// encode=1 indicates Base64 encoding only (without AES).
-	// Passing encode=1 with AES ciphertext caused gateway to report "用户名或密码错误" (0x8000001A).
-	// Format is raw parameter concatenation as implemented in SecController.dll without URL-escaping.
-	authBody := fmt.Sprintf("username=%s&password=%s&encode=2&verifycode=%s", encUser, encPwd, verifycode)
+	// encode=2 tells a v2.0 gateway to AES-128-CBC decrypt. encode=1 is
+	// legacy base64 and makes the gateway answer 0x8000001A. The body is
+	// raw concatenation, matching SecController.dll (no URL escaping).
+	authBody := passwordAuthBody(encUser, encPwd, verifycode)
+	if changing {
+		encNew, err := crypto.EncryptAuthParam(newPassword)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt new password: %w", err)
+		}
+		authBody = changePasswordAuthBody(encUser, encPwd, encNew, verifycode)
+	}
 
-	authURL := fmt.Sprintf("%s/vpn/user/auth/password", c.BaseURL)
-	req, err := http.NewRequest("POST", authURL, strings.NewReader(authBody))
+	authResp, respBody, statusCode, err := c.postAuth(authBody)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "LeadSec VPN Client")
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		c.Logger("ERROR", "Auth request failed: %v", err)
-		return nil, fmt.Errorf("auth request network error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	c.Logger("INFO", "Auth response status: %s", resp.Status)
-
-	// Parse XML response body to detect gateway errors
-	var authResp AuthResponse
-	if err := xml.Unmarshal(respBody, &authResp); err == nil && authResp.Result.Code != "" {
-		codeVal, _ := strconv.ParseUint(strings.TrimPrefix(authResp.Result.Code, "0x"), 16, 64)
-		if authResp.Result.Code != "0" && authResp.Result.Code != "0x0" && codeVal != 0 {
-			errMsg := authResp.Result.Msg
-			if errMsg == "" {
-				errMsg = "网关拒绝登录认证"
-			}
-			c.Logger("ERROR", "Gateway authentication failed: %s (code: %s)", errMsg, authResp.Result.Code)
-			return nil, fmt.Errorf("登录失败: %s (错误代码: %s)", errMsg, authResp.Result.Code)
-		}
+	if authResp.Result.Code != "" && !isSuccessCode(authResp.Result.Code) {
+		authErr := newAuthError(authResp.Result.Code, authResp.Result.Msg)
+		c.Logger("ERROR", "Gateway authentication failed: %s", authErr.Error())
+		return nil, authErr
 	}
 
-	// Check cookies for session ID (VSG_SESSIONID)
-	u, _ := url.Parse(c.BaseURL)
-	for _, cookie := range c.HTTPClient.Jar.Cookies(u) {
-		if strings.EqualFold(cookie.Name, "VSG_SESSIONID") && cookie.Value != "" {
-			c.SessionID = cookie.Value
-			c.SessionCookie = cookie.String()
-			c.Logger("SUCCESS", "Acquired Session ID: %s", c.SessionID)
-			break
-		}
-	}
+	c.captureSession()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("login failed with HTTP status %d: %s", resp.StatusCode, string(respBody))
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("login failed with HTTP status %d: %s", statusCode, string(respBody))
 	}
 
 	if c.SessionID == "" {
+		if changing && isSuccessCode(authResp.Result.Code) {
+			c.Logger("SUCCESS", "Password changed for user %s; gateway did not issue a session", username)
+			return nil, nil
+		}
 		c.Logger("ERROR", "No valid Session ID received from gateway. Response: %s", string(respBody))
 		return nil, fmt.Errorf("登录未下发有效会话ID (可能凭证错误或需要图形验证码)")
 	}
 
-	// Fetch integration resources
 	integration, err := c.fetchIntegrationInfo()
 	if err != nil {
 		c.Logger("ERROR", "Fetch integration info failed: %v", err)
@@ -191,14 +195,55 @@ func (c *Client) Login(username, password, verifycode string) (*IntegrationInfo,
 
 	c.isLoggedIn = true
 
-	// Start heartbeat
 	interval := 180 * time.Second
-	if c.Integration != nil && c.Integration.Session.DetectInterval > 0 {
+	if c.Integration.Session.DetectInterval > 0 {
 		interval = time.Duration(c.Integration.Session.DetectInterval) * time.Second
 	}
 	c.startHeartbeatLoop(interval)
 
 	return c.Integration, nil
+}
+
+func (c *Client) postAuth(authBody string) (AuthResponse, []byte, int, error) {
+	authURL := fmt.Sprintf("%s/vpn/user/auth/password", c.BaseURL)
+	req, err := http.NewRequest(http.MethodPost, authURL, strings.NewReader(authBody))
+	if err != nil {
+		return AuthResponse{}, nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "LeadSec VPN Client")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		c.Logger("ERROR", "Auth request failed: %v", err)
+		return AuthResponse{}, nil, 0, fmt.Errorf("auth request network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	respBody = prepareGatewayXML(respBody)
+	c.Logger("INFO", "Auth response status: %s", resp.Status)
+
+	var authResp AuthResponse
+	if err := xml.Unmarshal(respBody, &authResp); err != nil {
+		c.Logger("WARN", "Auth response was not XML: %s", string(respBody))
+	}
+	return authResp, respBody, resp.StatusCode, nil
+}
+
+func (c *Client) captureSession() {
+	u, err := url.Parse(c.BaseURL)
+	if err != nil || c.HTTPClient.Jar == nil {
+		return
+	}
+	for _, cookie := range c.HTTPClient.Jar.Cookies(u) {
+		if strings.EqualFold(cookie.Name, "VSG_SESSIONID") && cookie.Value != "" {
+			c.SessionID = cookie.Value
+			c.SessionCookie = cookie.String()
+			c.Logger("SUCCESS", "Acquired Session ID: %s", c.SessionID)
+			return
+		}
+	}
 }
 
 // fetchIntegrationInfo retrieves the integration.xml containing resources and policies

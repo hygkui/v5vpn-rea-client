@@ -27,6 +27,11 @@
   const connectBtn = document.getElementById('connect-btn');
   const connectBtnText = document.getElementById('connect-btn-text');
   const connectSpinner = connectBtn.querySelector('.btn-spinner');
+  const passwordChangePanel = document.getElementById('password-change-panel');
+  const newPasswordInput = document.getElementById('new-password-input');
+  const confirmPasswordInput = document.getElementById('confirm-password-input');
+  const changePasswordBtn = document.getElementById('change-password-btn');
+  const cancelChangePasswordBtn = document.getElementById('cancel-change-password-btn');
 
   // DOM Elements - Connected View
   const connectedGwName = document.getElementById('connected-gw-name');
@@ -72,7 +77,11 @@
         });
         clearTimeout(timeoutId);
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '登录失败');
+        if (!res.ok) {
+          const error = new Error(data.error || '登录失败');
+          error.code = data.code || '';
+          throw error;
+        }
         return data;
       } catch (err) {
         clearTimeout(timeoutId);
@@ -149,6 +158,32 @@
           body: JSON.stringify({ mode })
         });
       } catch (_) {}
+    },
+    async changePassword(gwId, username, password, newPassword, verifycode, remember, auto) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      try {
+        const res = await fetch('/api/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gwId, username, password, newPassword, verifycode, remember, auto }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        const data = await res.json();
+        if (!res.ok) {
+          const error = new Error(data.error || '修改密码失败');
+          error.code = data.code || '';
+          throw error;
+        }
+        return data;
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          throw new Error('网关响应超时(20s)，请检查网络与网关端口连通性');
+        }
+        throw err;
+      }
     },
     async checkUpdates() {
       if (window.VPNService && window.VPNService.checkForUpdates) {
@@ -274,6 +309,7 @@
   }
 
   function onGatewayChanged() {
+    if (passwordChangePanel) hidePasswordChangePanel();
     const selectedVal = gatewaySelect.value;
     if (!config || !config.gateways) return;
     currentGateway = config.gateways.find(g => (g.id === selectedVal || g.name === selectedVal));
@@ -396,20 +432,104 @@
       const res = await api.login(gwId, username, password, verifycode, remember, auto);
       showConnectedView(res);
     } catch (err) {
-      let msg = err.message || '未知错误';
-      if (msg.includes('0x00000100') || msg.includes('口令过期')) {
-        msg = '网关提示：账号口令已过期，请在内网环境中修改密码后重新登录！';
-      } else if (msg.includes('0x8000001A') || msg.includes('用户名或密码错误')) {
-        msg = '网关提示：用户名或密码错误，请检查输入的账号或密码！';
+      const msg = friendlyLoginError(err);
+      if (isPasswordExpired(err)) {
+        showPasswordChangePanel();
       }
       showLoginAlert(msg, 'error');
       setConnectingState(false);
     }
   }
 
+  function isPasswordExpired(err) {
+    if (err && err.code === 'password_expired') return true;
+    const msg = (err && err.message) || '';
+    return /口令过期|密码过期|口令已过期|密码已过期|口令到期|密码到期|请修改密码|请修改口令|0x0*100\b|password expired/i.test(msg);
+  }
+
+  function friendlyLoginError(err) {
+    let msg = (err && err.message) || '未知错误';
+    if (isPasswordExpired(err)) {
+      return '网关提示：账号口令已过期，请在下方设置新密码。';
+    }
+    if (msg.includes('0x8000001A') || msg.includes('用户名或密码错误')) {
+      return '网关提示：用户名或密码错误，请检查输入的账号或密码！';
+    }
+    return msg;
+  }
+
+  function showPasswordChangePanel() {
+    passwordChangePanel.style.display = 'block';
+    connectBtn.style.display = 'none';
+    newPasswordInput.focus();
+  }
+
+  function hidePasswordChangePanel() {
+    passwordChangePanel.style.display = 'none';
+    connectBtn.style.display = '';
+    newPasswordInput.value = '';
+    confirmPasswordInput.value = '';
+  }
+
+  async function handleChangePassword() {
+    const gwId = gatewaySelect.value;
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    const newPassword = newPasswordInput.value;
+    const verifycode = verifycodeInput.value.trim();
+    const remember = rememberPwdCheckbox.checked;
+    const auto = autoLoginCheckbox.checked;
+
+    if (!gwId || !username || !password) {
+      showLoginAlert('请输入网关、用户名和当前登录密码', 'error');
+      return;
+    }
+    if (!newPassword) {
+      showLoginAlert('请输入新密码', 'error');
+      return;
+    }
+    if (newPassword !== confirmPasswordInput.value) {
+      showLoginAlert('两次输入的新密码不一致', 'error');
+      return;
+    }
+    if (newPassword === password) {
+      showLoginAlert('新密码不能与当前密码相同', 'error');
+      return;
+    }
+
+    hideLoginAlert();
+    changePasswordBtn.disabled = true;
+    changePasswordBtn.textContent = '正在修改密码...';
+    try {
+      const res = await api.changePassword(gwId, username, password, newPassword, verifycode, remember, auto);
+      passwordInput.value = newPassword;
+      hidePasswordChangePanel();
+      showConnectedView(res);
+    } catch (err) {
+      showLoginAlert(err.message || '修改密码失败', 'error');
+    } finally {
+      changePasswordBtn.disabled = false;
+      changePasswordBtn.textContent = '修改密码并连接';
+    }
+  }
+
   loginForm.addEventListener('submit', (e) => {
     e.preventDefault();
+    if (passwordChangePanel.style.display !== 'none') {
+      handleChangePassword();
+      return;
+    }
     handleLogin();
+  });
+
+  changePasswordBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    handleChangePassword();
+  });
+
+  cancelChangePasswordBtn.addEventListener('click', () => {
+    hidePasswordChangePanel();
+    hideLoginAlert();
   });
 
   connectBtn.addEventListener('click', (e) => {

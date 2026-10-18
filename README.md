@@ -52,6 +52,7 @@
      - `encode=1`：v1.0 旧版网关模式，仅对明文口令做 Base64 编码。
    - 字段：`username={EncUser}&password={EncPwd}&encode=2&verifycode={code}`。
    - 登录成功返回 Session Cookie：`VSG_SESSIONID`。
+   - **口令过期**：结果码 `0x00000100`（十进制 256），或提示语含「口令过期 / 密码已过期 / 请修改密码」。网关有时仍回 `0x8000001A`，但正文是过期而不是账密错误；响应若是 GBK，先转成 UTF-8 再判断。过期后，本客户端在同一接口上额外提交 `newpassword={EncNew}`，成功则用新密码继续登录。这个字段还没有在原厂客户端或生产网关上确认。
 3. **获取授权资源**：`GET /vpn/user/portal/intergration.xml?version=2.0`
    - 获得 TCP/UDP 内网资源列表与端口、策略及 DNS。
 4. **隧道建立与数据透传**：
@@ -113,6 +114,12 @@ http://127.0.0.1:45678
 #### 命令行直连网关：
 ```bash
 .\v5vpn-rea.exe -cli -connect "<gateway-name>" -user "<username>" -pwd "<password>"
+```
+
+口令过期时带上新密码：
+
+```bash
+.\v5vpn-rea.exe -cli -connect "<gateway-name>" -user "<username>" -pwd "<old-password>" -new-pwd "<new-password>"
 ```
 
 ---

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,6 +67,24 @@ func TestVPNService_ConcurrentLoggingAndStatus(t *testing.T) {
 	logs := s.GetLogs()
 	if len(logs) == 0 {
 		t.Errorf("expected logs to be recorded")
+	}
+}
+
+func TestChangePasswordRejectsBlankOrUnchanged(t *testing.T) {
+	s := NewVPNService(nil)
+
+	_, err := s.ChangePassword("demo-gateway", "alice", "old-secret", "", "", false, false)
+	if err == nil || !strings.Contains(err.Error(), "新密码不能为空") {
+		t.Fatalf("empty new password: %v", err)
+	}
+
+	_, err = s.ChangePassword("demo-gateway", "alice", "same-secret", "same-secret", "", false, false)
+	if err == nil || !strings.Contains(err.Error(), "不能与当前密码相同") {
+		t.Fatalf("unchanged password: %v", err)
+	}
+
+	if s.GetStatus()["status"] != "Disconnected" {
+		t.Fatalf("rejected change password altered status: %v", s.GetStatus()["status"])
 	}
 }
 
