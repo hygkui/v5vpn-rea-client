@@ -52,14 +52,17 @@
      - `encode=1`：v1.0 旧版网关模式，仅对明文口令做 Base64 编码。
    - 字段：`username={EncUser}&password={EncPwd}&encode=2&verifycode={code}`。
    - 登录成功返回 Session Cookie：`VSG_SESSIONID`。
-   - **口令过期**：结果码 `0x00000100`（十进制 256），或提示语含「口令过期 / 密码已过期 / 请修改密码」。网关有时仍回 `0x8000001A`，但正文是过期而不是账密错误；响应若是 GBK，先转成 UTF-8 再判断。过期后，本客户端在同一接口上额外提交 `newpassword={EncNew}`，成功则用新密码继续登录。这个字段还没有在原厂客户端或生产网关上确认。
-3. **获取授权资源**：`GET /vpn/user/portal/intergration.xml?version=2.0`
+   - **口令过期识别**：结果码 `0x00000100`（十进制 256），或提示语包含「口令过期 / 密码已过期 / 请修改密码」。网关有时返回 `0x8000001A` 但提示正文为口令过期（若响应为 GBK 编码，客户端会自动转换为 UTF-8 进行解析判断）。
+3. **口令修改**：`POST /vpn/user/auth/pwdchange`
+   - 字段：`old_pwd={Base64(OldPwd)}&new_pwd={Base64(NewPwd)}&encode=1`。
+   - 密码采用标准 Base64 编码，`encode=1` 指示网关使用 Base64 解码。修改成功后，客户端自动使用新密码完成登录并建立隧道。
+4. **获取授权资源**：`GET /vpn/user/portal/intergration.xml?version=2.0`
    - 获得 TCP/UDP 内网资源列表与端口、策略及 DNS。
-4. **隧道建立与数据透传**：
+5. **隧道建立与数据透传**：
    - 本地自动分配代理端口监听。
    - 建立 SSL 连接并发送 `CONNECT {TargetIP}:{TargetPort} HTTP/1.1\r\nCookie: VSG_SESSIONID={SessionID}` 进行全双工透传。
-5. **保活心跳**：`GET /vpn/user/portal/intergration.xml?period={interval}&version=2.0`。
-6. **安全登出**：`GET /vpn/user/logout`。
+6. **保活心跳**：`GET /vpn/user/portal/intergration.xml?period={interval}&version=2.0`。
+7. **安全登出**：`GET /vpn/user/logout`。
 
 ---
 

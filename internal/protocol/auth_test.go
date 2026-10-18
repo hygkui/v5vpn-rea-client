@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hygkui/v5vpn-rea-client/internal/crypto"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -86,25 +85,17 @@ func TestLoginBadCredentialsStayBadCredentials(t *testing.T) {
 	}
 }
 
-func TestChangePasswordSendsNewPasswordAndConnects(t *testing.T) {
-	encNew, err := crypto.EncryptAuthParam("new-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestChangePasswordSubmitsPwdChangeEndpoint(t *testing.T) {
+	b64Old := "b2xkLXNlY3JldA==" // base64("old-secret")
+	b64New := "bmV3LXNlY3JldA==" // base64("new-secret")
 
-	var got string
+	var gotPath, gotBody string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/vpn/user/auth/password", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/vpn/user/auth/pwdchange", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		b, _ := io.ReadAll(r.Body)
-		got = string(b)
-		http.SetCookie(w, &http.Cookie{Name: "VSG_SESSIONID", Value: "sid-1", Path: "/"})
-		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0" msg="ok"/></RESPONSE>`)
-	})
-	mux.HandleFunc("/vpn/user/portal/intergration.xml", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `<INTERGRATION_INFO><USER name="alice"/><SESSION id="sid-1" detect_interval="3600"/><RESOURCE_LIST></RESOURCE_LIST></INTERGRATION_INFO>`)
-	})
-	mux.HandleFunc("/vpn/user/logout", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		gotBody = string(b)
+		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0" msg="密码修改成功"/></RESPONSE>`)
 	})
 
 	srv := httptest.NewTLSServer(mux)
@@ -114,37 +105,37 @@ func TestChangePasswordSendsNewPasswordAndConnects(t *testing.T) {
 	if err := client.ChangePassword("alice", "old-secret", "new-secret", ""); err != nil {
 		t.Fatal(err)
 	}
-	defer client.Logout()
 
-	if !strings.Contains(got, "newpassword="+encNew) {
-		t.Fatalf("auth body missing encrypted newpassword: %s", got)
+	if gotPath != "/vpn/user/auth/pwdchange" {
+		t.Fatalf("expected /vpn/user/auth/pwdchange, got %q", gotPath)
 	}
-	if strings.Contains(got, "new-secret") {
-		t.Fatal("new password was sent in clear text")
+	if !strings.Contains(gotBody, "old_pwd="+b64Old) {
+		t.Fatalf("request body missing old_pwd=%s: %s", b64Old, gotBody)
 	}
-	if !strings.Contains(got, "encode=2") {
-		t.Fatalf("auth body missing encode=2: %s", got)
+	if !strings.Contains(gotBody, "new_pwd="+b64New) {
+		t.Fatalf("request body missing new_pwd=%s: %s", b64New, gotBody)
 	}
-	if !client.IsLoggedIn() {
-		t.Fatal("expected session after password change")
-	}
-	if client.SessionID != "sid-1" {
-		t.Fatalf("session = %q", client.SessionID)
+	if !strings.Contains(gotBody, "encode=1") {
+		t.Fatalf("request body missing encode=1: %s", gotBody)
 	}
 }
 
-func TestChangePasswordWithoutSessionIsNotAnError(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0x0" msg="修改成功"/></RESPONSE>`)
-	}))
+func TestChangePasswordHandlesGatewayErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vpn/user/auth/pwdchange", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<RESPONSE><RESULT code="0x11A" msg="旧密码错误"/></RESPONSE>`)
+	})
+
+	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()
 
 	client := testClient(t, srv)
-	if err := client.ChangePassword("alice", "old-secret", "new-secret", ""); err != nil {
-		t.Fatal(err)
+	err := client.ChangePassword("alice", "wrong-old", "new-secret", "")
+	if err == nil {
+		t.Fatal("expected error on rejected password change")
 	}
-	if client.IsLoggedIn() {
-		t.Fatal("gateway did not issue a session")
+	if !strings.Contains(err.Error(), "旧密码错误") && !strings.Contains(err.Error(), "0x11A") {
+		t.Fatalf("expected error message to contain reason or code: %v", err)
 	}
 }
 

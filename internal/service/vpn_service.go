@@ -298,34 +298,28 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 	s.setStatus("Connecting", fmt.Sprintf("Changing password on %s (%s:%d)...", gwName, gwIP, gwPort))
 	s.Log("INFO", "Changing password for %s on %s (%s:%d)...", username, gwName, gwIP, gwPort)
 
-	client := protocol.NewClient(gwIP, gwPort, gwAlgo, s.Log)
-	if _, err := client.Handshake(); err != nil {
-		s.setStatus("Error", fmt.Sprintf("Handshake failed: %v", err))
-		return nil, err
+	s.mu.Lock()
+	client := s.Client
+	s.mu.Unlock()
+
+	if client == nil || client.GatewayIP != gwIP {
+		client = protocol.NewClient(gwIP, gwPort, gwAlgo, s.Log)
+		if _, err := client.Handshake(); err != nil {
+			s.setStatus("Error", fmt.Sprintf("Handshake failed: %v", err))
+			return nil, err
+		}
 	}
 	if err := client.ChangePassword(username, password, newPassword, verifycode); err != nil {
 		s.setStatus("Error", fmt.Sprintf("修改密码失败: %v", err))
 		return nil, err
 	}
 
-	if !client.IsLoggedIn() {
-		s.mu.Lock()
-		s.Status = "Disconnected"
-		s.StatusDetail = "密码已更新，正在登录"
-		s.mu.Unlock()
-		s.Log("SUCCESS", "Password changed for %s; signing in with the new password", username)
-		return s.Login(gwIdentifier, username, newPassword, verifycode, remember, auto)
-	}
-
-	if remember {
-		s.mu.Lock()
-		if saved := s.Config.FindGateway(gwIdentifier); saved != nil {
-			s.storeAccountLocked(saved, username, newPassword, remember, auto)
-			_ = s.Config.SaveSettingXML("")
-		}
-		s.mu.Unlock()
-	}
-	return s.connectTunnel(client, username)
+	s.mu.Lock()
+	s.Status = "Disconnected"
+	s.StatusDetail = "密码已更新，正在登录"
+	s.mu.Unlock()
+	s.Log("SUCCESS", "Password changed for %s; signing in with the new password", username)
+	return s.Login(gwIdentifier, username, newPassword, verifycode, remember, auto)
 }
 
 // IsPasswordExpired reports a gateway password-change challenge.

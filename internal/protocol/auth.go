@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -168,9 +169,10 @@ func passwordAuthBody(encUser, encPwd, verifycode string) string {
 	return fmt.Sprintf("username=%s&password=%s&encode=2&verifycode=%s", encUser, encPwd, verifycode)
 }
 
-// changePasswordAuthBody is the same login form plus newpassword.
-// The field name is a candidate for the Windows v2.0 client. It has not
-// been confirmed from SecLogin or a live gateway capture.
-func changePasswordAuthBody(encUser, encOld, encNew, verifycode string) string {
-	return fmt.Sprintf("username=%s&password=%s&newpassword=%s&encode=2&verifycode=%s", encUser, encOld, encNew, verifycode)
+// passwordChangeBody formats the request body for /vpn/user/auth/pwdchange.
+// Both passwords are standard Base64-encoded, and encode=1 indicates Base64 encoding.
+func passwordChangeBody(oldPassword, newPassword string) string {
+	b64Old := base64.StdEncoding.EncodeToString([]byte(oldPassword))
+	b64New := base64.StdEncoding.EncodeToString([]byte(newPassword))
+	return fmt.Sprintf("old_pwd=%s&new_pwd=%s&encode=1", b64Old, b64New)
 }

@@ -105,13 +105,11 @@ func (c *Client) Handshake() (*VersionResponse, error) {
 func (c *Client) Login(username, password, verifycode string) (*IntegrationInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.authenticate(username, password, verifycode, "")
+	return c.authenticate(username, password, verifycode)
 }
 
-// ChangePassword submits the current password and a new one on the password
-// auth form. A successful change that also issues VSG_SESSIONID finishes
-// login on this client. A success code without a session means the gateway
-// stored the new password and the caller should log in again.
+// ChangePassword submits the old and new passwords to /vpn/user/auth/pwdchange.
+// Both passwords are base64-encoded with encode=1.
 func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode string) error {
 	if strings.TrimSpace(newPassword) == "" {
 		return fmt.Errorf("新密码不能为空")
@@ -122,19 +120,56 @@ func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode s
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, err := c.authenticate(username, oldPassword, verifycode, newPassword)
-	return err
+
+	c.Logger("INFO", "Submitting password change for user: %s", username)
+
+	changeBody := passwordChangeBody(oldPassword, newPassword)
+	changeURL := fmt.Sprintf("%s/vpn/user/auth/pwdchange", c.BaseURL)
+
+	req, err := http.NewRequest(http.MethodPost, changeURL, strings.NewReader(changeBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "LeadSec VPN Client")
+	if c.SessionCookie != "" {
+		req.Header.Set("Cookie", c.SessionCookie)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		c.Logger("ERROR", "Password change request failed: %v", err)
+		return fmt.Errorf("修改密码网络请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	respBody = prepareGatewayXML(respBody)
+	c.Logger("INFO", "Password change response status: %s", resp.Status)
+
+	var authResp AuthResponse
+	if err := xml.Unmarshal(respBody, &authResp); err != nil {
+		c.Logger("WARN", "Password change response was not XML: %s", string(respBody))
+	}
+
+	if authResp.Result.Code != "" && !isSuccessCode(authResp.Result.Code) {
+		authErr := newAuthError(authResp.Result.Code, authResp.Result.Msg)
+		c.Logger("ERROR", "Gateway rejected password change: %s", authErr.Error())
+		return authErr
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("password change failed with HTTP status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	c.captureSession()
+	c.Logger("SUCCESS", "Password changed successfully for user: %s", username)
+	return nil
 }
 
-// authenticate posts /vpn/user/auth/password. newPassword empty is a normal
-// login; a non-empty value adds the change-password field. Caller holds c.mu.
-func (c *Client) authenticate(username, password, verifycode, newPassword string) (*IntegrationInfo, error) {
-	changing := newPassword != ""
-	if changing {
-		c.Logger("INFO", "Submitting password change for user: %s", username)
-	} else {
-		c.Logger("INFO", "Initiating password authentication for user: %s", username)
-	}
+// authenticate posts /vpn/user/auth/password for login authentication. Caller holds c.mu.
+func (c *Client) authenticate(username, password, verifycode string) (*IntegrationInfo, error) {
+	c.Logger("INFO", "Initiating password authentication for user: %s", username)
 
 	encUser, err := crypto.EncryptAuthParam(username)
 	if err != nil {
@@ -147,20 +182,15 @@ func (c *Client) authenticate(username, password, verifycode, newPassword string
 
 	// encode=2 tells a v2.0 gateway to AES-128-CBC decrypt. encode=1 is
 	// legacy base64 and makes the gateway answer 0x8000001A. The body is
-	// raw concatenation, matching SecController.dll (no URL escaping).
+	// raw concatenation without URL-escaping.
 	authBody := passwordAuthBody(encUser, encPwd, verifycode)
-	if changing {
-		encNew, err := crypto.EncryptAuthParam(newPassword)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt new password: %w", err)
-		}
-		authBody = changePasswordAuthBody(encUser, encPwd, encNew, verifycode)
-	}
 
 	authResp, respBody, statusCode, err := c.postAuth(authBody)
 	if err != nil {
 		return nil, err
 	}
+
+	c.captureSession()
 
 	if authResp.Result.Code != "" && !isSuccessCode(authResp.Result.Code) {
 		authErr := newAuthError(authResp.Result.Code, authResp.Result.Msg)
@@ -168,17 +198,11 @@ func (c *Client) authenticate(username, password, verifycode, newPassword string
 		return nil, authErr
 	}
 
-	c.captureSession()
-
 	if statusCode != http.StatusOK {
 		return nil, fmt.Errorf("login failed with HTTP status %d: %s", statusCode, string(respBody))
 	}
 
 	if c.SessionID == "" {
-		if changing && isSuccessCode(authResp.Result.Code) {
-			c.Logger("SUCCESS", "Password changed for user %s; gateway did not issue a session", username)
-			return nil, nil
-		}
 		c.Logger("ERROR", "No valid Session ID received from gateway. Response: %s", string(respBody))
 		return nil, fmt.Errorf("登录未下发有效会话ID (可能凭证错误或需要图形验证码)")
 	}

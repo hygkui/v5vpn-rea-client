@@ -3,13 +3,12 @@
 ## Unreleased
 
 - Tell an expired VPN password apart from a wrong username or password.
-  A gateway reply of `0x00000100`, or a message that asks for a password
-  change (including GBK text carried under `0x8000001A`), opens a
+  A gateway reply of `0x00000100` (decimal 256), or a message indicating a password
+  change requirement (including GBK text carried under `0x8000001A`), opens a
   change-password form instead of the generic credential error.
-- Change that expired password from the login window, or with CLI
-  `-new-pwd`. The client posts `newpassword` to `/vpn/user/auth/password`
-  and then connects with the new password. That field name is not yet
-  confirmed against the official client or a live gateway.
+- Support password modification via `/vpn/user/auth/pwdchange` (`old_pwd`, `new_pwd`,
+  `encode=1`) from the login window or with CLI `-new-pwd`, automatically continuing
+  to connect and establish the tunnel with the updated password.
 
 ## 0.1.1
 
