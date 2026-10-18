@@ -127,6 +127,8 @@ http://127.0.0.1:45678
 .\v5vpn-rea.exe -cli -connect "<gateway-name>" -user "<username>" -pwd "<old-password>" -new-pwd "<new-password>"
 ```
 
+客户端会先用旧密码登录；只有网关返回 `0x100`（口令过期）时才执行改密。若密码未过期，则按旧密码正常连接，`-new-pwd` 不生效。
+
 ---
 
 ## 6. 项目目录结构

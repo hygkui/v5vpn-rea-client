@@ -10,11 +10,10 @@ import (
 
 // AuthKind classifies a rejected /vpn/user/auth/password result.
 //
-// Only result code 0x100 means "password expired": SecUI.exe branches on that
-// code alone when it opens the password-change view. A gateway can also answer
-// 0x8000001A (ciphertext parse failure) with an "expired" sentence in msg, but
-// that is still a credential error, so message text must never trigger the
-// change-password flow.
+// Classification is based solely on the gateway result code. Only 0x100 means
+// "password expired": SecUI.exe branches on that code alone when it opens the
+// password-change view. A gateway can also answer 0x8000001A (ciphertext parse
+// failure) with an "expired" sentence in msg, but the code still wins.
 type AuthKind int
 
 const (
@@ -97,46 +96,26 @@ func newAuthError(code, msg string) *AuthError {
 	}
 }
 
-func classifyAuth(code, msg string) AuthKind {
+func classifyAuth(code, _ string) AuthKind {
 	n, ok := parseResultCode(code)
-	if ok {
-		switch n {
-		case codePasswordExpired:
-			return AuthKindPasswordExpired
-		case codeBadCredentials, codeDecryptFailed:
-			return AuthKindBadCredentials
-		case codeVerifyCode:
-			return AuthKindVerifyCode
-		}
+	if !ok {
+		return AuthKindOther
 	}
-
-	// Message fallback for responses without a usable code. It may classify a
-	// credential error, but never a password expiry.
-	if containsAny(msg, "用户名或密码错误", "用户名或口令错误", "用户名密码错误") {
+	switch n {
+	case codePasswordExpired:
+		return AuthKindPasswordExpired
+	case codeBadCredentials, codeDecryptFailed:
 		return AuthKindBadCredentials
-	}
-	if strings.Contains(msg, "验证码") {
+	case codeVerifyCode:
 		return AuthKindVerifyCode
+	default:
+		return AuthKindOther
 	}
-	return AuthKindOther
 }
 
 func isResultCode(code string, want uint64) bool {
 	n, ok := parseResultCode(code)
 	return ok && n == want
-}
-
-func containsAny(msg string, parts ...string) bool {
-	if msg == "" {
-		return false
-	}
-	lower := strings.ToLower(msg)
-	for _, part := range parts {
-		if strings.Contains(lower, strings.ToLower(part)) {
-			return true
-		}
-	}
-	return false
 }
 
 // parseResultCode reads a gateway RESULT code. Hex forms keep the 0x prefix;

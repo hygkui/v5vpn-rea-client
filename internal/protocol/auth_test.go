@@ -23,7 +23,8 @@ func TestClassifyAuth(t *testing.T) {
 		{"0x00000100", "用户名或密码错误", AuthKindPasswordExpired},
 		{"256", "请修改口令", AuthKindPasswordExpired},
 		{"", "口令已过期，请修改密码", AuthKindOther},
-		{"", "用户名或密码错误", AuthKindBadCredentials},
+		{"", "用户名或密码错误", AuthKindOther},
+		{"not-a-code", "用户名或密码错误", AuthKindOther},
 		{"0x66600011", "请输入验证码", AuthKindVerifyCode},
 		{"0x80000013", "用户被锁定", AuthKindOther},
 	}

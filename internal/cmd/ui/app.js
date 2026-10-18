@@ -443,20 +443,17 @@
 
   function isPasswordExpired(err) {
     // Only the backend's 0x100 challenge may open the change-password panel.
-    // A 0x8000001A response can carry an "expired" sentence in its msg but is
-    // still a credential error.
     return !!(err && err.code === 'password_expired');
   }
 
   function friendlyLoginError(err) {
-    let msg = (err && err.message) || '未知错误';
     if (isPasswordExpired(err)) {
       return '网关提示：账号口令已过期，请在下方设置新密码。';
     }
-    if (msg.includes('0x8000001A') || msg.includes('0x101') || msg.includes('用户名或密码错误')) {
+    if (err && err.code === 'bad_credentials') {
       return '网关提示：用户名或密码错误，请检查输入的账号或密码！';
     }
-    return msg;
+    return (err && err.message) || '未知错误';
   }
 
   function showPasswordChangePanel() {

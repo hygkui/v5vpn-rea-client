@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -18,10 +19,8 @@ import (
 // challenge. /vpn/user/auth/pwdchange must reuse it so the VSG_SESSIONID
 // cookie issued by that response is sent with the change request.
 type passwordChallenge struct {
-	client      *protocol.Client
-	gatewayIP   string
-	gatewayPort int
-	username    string
+	client   *protocol.Client
+	username string
 }
 
 // VPNService is the backend service exposed to the MyGo frontend
@@ -278,10 +277,8 @@ func (s *VPNService) Login(gwIdentifier, username, password, verifycode string, 
 			// the VSG_SESSIONID issued with the 0x100 response.
 			s.mu.Lock()
 			s.passwordChallenge = &passwordChallenge{
-				client:      client,
-				gatewayIP:   gwIP,
-				gatewayPort: gwPort,
-				username:    username,
+				client:   client,
+				username: username,
 			}
 			s.mu.Unlock()
 		}
@@ -331,7 +328,7 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 	// Reuse the HTTP client that received the 0x100 challenge when it belongs
 	// to this gateway and user; its cookie jar carries VSG_SESSIONID.
 	if challenge != nil && challenge.username == username &&
-		challenge.gatewayIP == gwIP && challenge.gatewayPort == gwPort {
+		challenge.client.GatewayIP == gwIP && challenge.client.GatewayPort == gwPort {
 		client = challenge.client
 	}
 	if client == nil || client.GatewayIP != gwIP || client.GatewayPort != gwPort {
@@ -357,9 +354,29 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 	return s.Login(gwIdentifier, username, newPassword, verifycode, remember, auto)
 }
 
+// AuthErrorCode returns the stable machine-readable code for a gateway
+// authentication rejection, or "" when err is not an auth error. The frontend
+// keys its login messaging off this code instead of parsing error text.
+func AuthErrorCode(err error) string {
+	var authErr *protocol.AuthError
+	if !errors.As(err, &authErr) {
+		return ""
+	}
+	switch authErr.Kind {
+	case protocol.AuthKindPasswordExpired:
+		return "password_expired"
+	case protocol.AuthKindBadCredentials:
+		return "bad_credentials"
+	case protocol.AuthKindVerifyCode:
+		return "verify_code"
+	default:
+		return ""
+	}
+}
+
 // IsPasswordExpired reports a gateway password-change challenge.
 func IsPasswordExpired(err error) bool {
-	return protocol.IsPasswordExpired(err)
+	return AuthErrorCode(err) == "password_expired"
 }
 
 func (s *VPNService) storeAccountLocked(gw *config.GatewayProfile, username, password string, remember, auto bool) {
