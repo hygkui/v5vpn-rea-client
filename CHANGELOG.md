@@ -1,43 +1,29 @@
-# Changelog
+# 更新日志 (Changelog)
 
 ## Unreleased
 
-- Tell an expired VPN password apart from a wrong username or password.
-  A gateway reply of `0x00000100` (decimal 256), or a message indicating a password
-  change requirement (including GBK text carried under `0x8000001A`), opens a
-  change-password form instead of the generic credential error.
-- Support password modification via `/vpn/user/auth/pwdchange` (`old_pwd`, `new_pwd`,
-  `encode=1`) from the login window or with CLI `-new-pwd`, automatically continuing
-  to connect and establish the tunnel with the updated password.
+- **口令过期精准识别**：网关返回 `0x00000100`（十进制 256）或提示口令过期时（包括在 `0x8000001A` 状态码下携带的 GBK 编码正文提示），自动识别为密码到期，弹出修改密码表单，而非笼统归为账号密码错误。
+- **支持在线修改口令**：登录界面支持在口令过期时直接修改密码，CLI 模式可通过 `-new-pwd` 参数指定新口令；调用网关标准接口 `/vpn/user/auth/pwdchange`（参数 `old_pwd`、`new_pwd`、`encode=1`）完成更新，成功后自动使用新密码建立隧道并登录。
 
 ## 0.1.1
 
-- "Check for updates" buttons in the login and connected footers
-  (same trigger as the tray menu, via `/api/check-updates` or the
-  `VPNService.checkForUpdates` IPC call).
-- Release flow: workflow publishes automatically once all platform
-  builds pass, and takes the release notes from this changelog.
+- **检查更新功能**：登录界面与连接成功视图底部新增「检查更新」按钮（与托盘菜单行为一致，通过 `/api/check-updates` 或 `VPNService.checkForUpdates` IPC 调用触发）。
+- **自动化发布流程**：工作流在全平台编译通过后自动发布 Release，并从本更新日志中提取对应版本的发布说明。
 
 ## 0.1.0
 
-Initial public release.
+首次公开发布版本。
 
-- Password login against V5VPN SSL VPN gateways (protocol v2.0).
-- Pull authorized TCP/UDP resources from /vpn/user/portal/intergration.xml.
-- HTTP CONNECT tunnel proxy through the gateway with VSG_SESSIONID cookie.
-- Heartbeat / keepalive probe.
-- Safe logout via /vpn/user/logout.
-- MyGo desktop window with adaptive sizing (460x700 login, 720x620
-  gateway manager, 1248x832 connected workspace).
-- System tray with connection-state icon and right-click menu.
-- GitHub Star footer on login and connected views (opens the repo in
-  the system browser).
-- ed25519-signed self-update from GitHub releases (tray "Check for
-  updates...", ~10s after launch).
-- Local HTTP bridge at http://127.0.0.1:<port> for browser fallback.
-- Credential recovery: -dump-passwords reads and decrypts legacy
-  setting.xml / setting.ini from the current directory or the
-  executable directory.
-- CLI mode: -cli -connect <gateway> -user <u> -pwd <p>.
-- README, DISCLAIMER, NOTICE and configs/setting.xml.example so
-  operators can bootstrap without checking production data into VCS.
+- **SSL VPN 网关口令登录**：支持接入 V5VPN SSL VPN 网关（协议 v2.0）。
+- **内网资源授权拉取**：从 `/vpn/user/portal/intergration.xml` 获取已授权的 TCP/UDP 资源列表。
+- **隧道建立与数据透传**：通过网关建立携带 `VSG_SESSIONID` Cookie 的 HTTP CONNECT 隧道代理。
+- **心跳保活机制**：定时探测维持长连接会话。
+- **安全登出**：通过 `/vpn/user/logout` 安全注销会话。
+- **MyGo 原生跨平台桌面客户端**：窗口自适应尺寸（登录 460x700，网关管理 720x620，已连接工作台 1248x832）。
+- **系统托盘**：实时展示连接状态图标并提供右键功能菜单。
+- **底部 GitHub 导航**：登录与已连接视图页脚提供一键跳转项目主页。
+- **自更新机制**：基于 ed25519 签名校验的 GitHub Release 自动更新检测。
+- **本地 Web 访问支持**：内置本地 HTTP 服务（`http://127.0.0.1:<端口>`）作为浏览器回退访问通道。
+- **本地历史凭证恢复**：提供 `-dump-passwords` 参数，可读取并解密当前目录或原安装路径下的 `setting.xml` / `setting.ini` 配置。
+- **命令行 (CLI) 模式**：支持通过 `-cli -connect <网关> -user <用户名> -pwd <密码>` 静默连接。
+- **基础配套**：完善 README、免责声明 (DISCLAIMER)、第三方开源许可声明 (NOTICE) 与脱敏示例配置 (`configs/setting.xml.example`)。
