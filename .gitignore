@@ -26,6 +26,7 @@ REDACT_LOCAL.txt
 
 # Build output
 /build/
+/dist/
 mygo-update.key
 mygo-update.pub
 
