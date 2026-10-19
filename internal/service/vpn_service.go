@@ -338,6 +338,17 @@ func (s *VPNService) ChangePassword(gwIdentifier, username, password, newPasswor
 			return nil, err
 		}
 	}
+
+	// Ensure the client has an active session cookie (VSG_SESSIONID) required by pwdchange.
+	if client.SessionID == "" {
+		if _, err := client.AuthPassword(username, password, verifycode); err != nil {
+			if !protocol.IsPasswordExpired(err) {
+				s.setStatus("Error", fmt.Sprintf("验证当前密码失败: %v", err))
+				return nil, err
+			}
+		}
+	}
+
 	if err := client.ChangePassword(username, password, newPassword, verifycode); err != nil {
 		s.setStatus("Error", fmt.Sprintf("修改密码失败: %v", err))
 		return nil, err

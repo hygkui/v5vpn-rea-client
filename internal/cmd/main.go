@@ -40,6 +40,7 @@ func main() {
 	userFlag := flag.String("user", "", "Username for CLI connection (defaults to remembered user)")
 	pwdFlag := flag.String("pwd", "", "Password for CLI connection (defaults to remembered password)")
 	newPwdFlag := flag.String("new-pwd", "", "New password when the gateway requires a password change")
+	forceFlag := flag.Bool("force", false, "Force password change even if current password is not expired")
 	httpPort := flag.Int("port", 0, "Serve web UI on custom HTTP port (0 for auto)")
 	flag.Parse()
 
@@ -65,7 +66,7 @@ func main() {
 
 	// CLI Connect Mode
 	if *cliMode && *connectGW != "" {
-		runCLIConnect(vpnService, *connectGW, *userFlag, *pwdFlag, *newPwdFlag)
+		runCLIConnect(vpnService, *connectGW, *userFlag, *pwdFlag, *newPwdFlag, *forceFlag)
 		return
 	}
 
@@ -608,21 +609,38 @@ func writeLoginResult(w http.ResponseWriter, res map[string]any, err error) {
 type cliConnector interface {
 	Login(gwIdentifier, username, password, verifycode string, remember, auto bool) (map[string]any, error)
 	ChangePassword(gwIdentifier, username, password, newPassword, verifycode string, remember, auto bool) (map[string]any, error)
+	Logout() (bool, error)
 }
 
-// connectWithOptionalPasswordChange mirrors the original client: authenticate
-// with the current password first. Only a 0x100 challenge triggers a password
-// change; otherwise the successful login is kept and the new password ignored.
-func connectWithOptionalPasswordChange(c cliConnector, gwName, user, pwd, newPwd string) (map[string]any, bool, error) {
+// connectWithOptionalPasswordChange handles password expiry checks and optional password changes.
+// If force is true, it proceeds to change password directly.
+// If force is false and the current password is valid (unexpired), it prompts for confirmation.
+func connectWithOptionalPasswordChange(c cliConnector, gwName, user, pwd, newPwd string, force bool) (map[string]any, bool, error) {
 	if newPwd == "" {
 		res, err := c.Login(gwName, user, pwd, "", true, false)
 		return res, false, err
+	}
+
+	if force {
+		res, err := c.ChangePassword(gwName, user, pwd, newPwd, "", true, false)
+		return res, err == nil, err
 	}
 
 	// Probe with remember disabled: the old password may be wrong, and only the
 	// post-change login should persist a password.
 	res, err := c.Login(gwName, user, pwd, "", false, false)
 	if err == nil {
+		fmt.Print("\n网关检测提示: 当前密码有效（未过期）。\n是否确认修改密码？[y/N]: ")
+		var answer string
+		_, _ = fmt.Scanln(&answer)
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer == "y" || answer == "yes" {
+			fmt.Println("用户确认修改密码，正在更新密码...")
+			_, _ = c.Logout()
+			res, err = c.ChangePassword(gwName, user, pwd, newPwd, "", true, false)
+			return res, err == nil, err
+		}
+		fmt.Println("已取消修改密码，使用当前密码继续连接。")
 		return res, false, nil
 	}
 	if !service.IsPasswordExpired(err) {
@@ -633,7 +651,7 @@ func connectWithOptionalPasswordChange(c cliConnector, gwName, user, pwd, newPwd
 	return res, err == nil, err
 }
 
-func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string) {
+func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string, force bool) {
 	gw := svc.Config.FindGateway(gwName)
 	if gw == nil {
 		fmt.Fprintf(os.Stderr, "未找到网关: %s\n", gwName)
@@ -653,8 +671,8 @@ func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string) {
 	}
 
 	fmt.Printf("正在连接网关 %s (%s:%d), 用户: %s...\n", gw.Name, gw.IP, gw.Port, user)
-	res, passwordChanged, err := connectWithOptionalPasswordChange(svc, gw.Name, user, pwd, newPwd)
-	if err == nil && newPwd != "" && !passwordChanged {
+	res, passwordChanged, err := connectWithOptionalPasswordChange(svc, gw.Name, user, pwd, newPwd, force)
+	if err == nil && newPwd != "" && !passwordChanged && force {
 		fmt.Fprintln(os.Stderr, "网关未提示口令过期，-new-pwd 未生效；已使用当前密码连接。")
 	}
 	if err != nil {

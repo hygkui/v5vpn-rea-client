@@ -187,8 +187,15 @@ func (c *Client) ChangePassword(username, oldPassword, newPassword, verifycode s
 	return nil
 }
 
-// authenticate posts /vpn/user/auth/password for login authentication. Caller holds c.mu.
-func (c *Client) authenticate(username, password, verifycode string) (*IntegrationInfo, error) {
+// AuthPassword verifies the user credentials against /vpn/user/auth/password
+// and captures the session cookie without fetching integration resources.
+func (c *Client) AuthPassword(username, password, verifycode string) (*AuthResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.authPasswordLocked(username, password, verifycode)
+}
+
+func (c *Client) authPasswordLocked(username, password, verifycode string) (*AuthResponse, error) {
 	c.Logger("INFO", "Initiating password authentication for user: %s", username)
 
 	encUser, err := crypto.EncryptAuthParam(username)
@@ -215,7 +222,7 @@ func (c *Client) authenticate(username, password, verifycode string) (*Integrati
 	if authResp.Result.Code != "" && !isSuccessCode(authResp.Result.Code) {
 		authErr := newAuthError(authResp.Result.Code, authResp.Result.Msg)
 		c.Logger("ERROR", "Gateway authentication failed: %s", authErr.Error())
-		return nil, authErr
+		return &authResp, authErr
 	}
 
 	if statusCode != http.StatusOK {
@@ -225,6 +232,15 @@ func (c *Client) authenticate(username, password, verifycode string) (*Integrati
 	if c.SessionID == "" {
 		c.Logger("ERROR", "No valid Session ID received from gateway. Response: %s", string(respBody))
 		return nil, fmt.Errorf("登录未下发有效会话ID (可能凭证错误或需要图形验证码)")
+	}
+
+	return &authResp, nil
+}
+
+// authenticate posts /vpn/user/auth/password for login authentication. Caller holds c.mu.
+func (c *Client) authenticate(username, password, verifycode string) (*IntegrationInfo, error) {
+	if _, err := c.authPasswordLocked(username, password, verifycode); err != nil {
+		return nil, err
 	}
 
 	integration, err := c.fetchIntegrationInfo()
