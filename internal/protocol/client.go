@@ -58,7 +58,7 @@ func NewClient(ip string, port int, algo int, logger func(string, string, ...any
 	httpClient := &http.Client{
 		Transport: tr,
 		Jar:       jar,
-		Timeout:   15 * time.Second,
+		Timeout:   30 * time.Second,
 	}
 
 	baseURL := fmt.Sprintf("https://%s:%d", ip, port)

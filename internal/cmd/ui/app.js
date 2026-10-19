@@ -28,6 +28,8 @@
   const connectBtnText = document.getElementById('connect-btn-text');
   const connectSpinner = connectBtn.querySelector('.btn-spinner');
   const passwordChangePanel = document.getElementById('password-change-panel');
+  const passwordChangeHint = document.querySelector('.password-change-hint');
+  const voluntaryChangePwdLink = document.getElementById('voluntary-change-pwd-link');
   const newPasswordInput = document.getElementById('new-password-input');
   const confirmPasswordInput = document.getElementById('confirm-password-input');
   const changePasswordBtn = document.getElementById('change-password-btn');
@@ -35,6 +37,7 @@
 
   // DOM Elements - Connected View
   const connectedGwName = document.getElementById('connected-gw-name');
+  const connectedChangePwdBtn = document.getElementById('connected-change-pwd-btn');
   const sessionUserVal = document.getElementById('session-user-val');
   const sessionIpVal = document.getElementById('session-ip-val');
   const sessionIdVal = document.getElementById('session-id-val');
@@ -456,7 +459,14 @@
     return (err && err.message) || '未知错误';
   }
 
-  function showPasswordChangePanel() {
+  function showPasswordChangePanel(isVoluntary = false) {
+    if (passwordChangeHint) {
+      if (isVoluntary) {
+        passwordChangeHint.textContent = '您已确认修改密码，请在下方设置新密码。修改成功后将自动使用新密码连接。';
+      } else {
+        passwordChangeHint.textContent = '网关要求先修改已过期的登录密码。修改成功后会用新密码继续连接。';
+      }
+    }
     passwordChangePanel.style.display = 'block';
     connectBtn.style.display = 'none';
     newPasswordInput.focus();
@@ -518,6 +528,34 @@
       return;
     }
     handleLogin();
+  });
+
+  voluntaryChangePwdLink?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const gwId = gatewaySelect.value;
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+    if (!gwId || !username || !password) {
+      showLoginAlert('请先选择网关并输入账号与当前密码', 'error');
+      return;
+    }
+    if (!confirm('当前密码有效（未过期），是否确认修改密码？')) {
+      return;
+    }
+    hideLoginAlert();
+    showPasswordChangePanel(true);
+  });
+
+  connectedChangePwdBtn?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    if (!confirm('当前处于正常连接状态，是否确认修改密码？\n确认后将断开当前连接并进入修改密码界面。')) {
+      return;
+    }
+    try {
+      await api.logout();
+    } catch (_) {}
+    showLoginView();
+    showPasswordChangePanel(true);
   });
 
   changePasswordBtn.addEventListener('click', (e) => {
