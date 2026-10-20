@@ -1,7 +1,7 @@
 {
   "name": "v5vpn-rea",
   "identifier": "io.github.hygkui.v5vpn-rea",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "copyright": "Copyright 2026 hygkui and contributors",
   "main": "./internal/cmd",
   "out": "build",

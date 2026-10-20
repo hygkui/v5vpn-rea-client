@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/egoist/mygo"
@@ -32,12 +33,22 @@ const AppName = "v5vpn-rea"
 // TestAppVersionMatchesMygoJSON test fails the build if they drift.
 // NOTE: "2.0" is the gateway protocol version (/vpn/version.xml), not the
 // app version — do not "fix" this back to v2.0.0.
-var AppVersion = "v0.2.1"
+var AppVersion = "v0.3.0"
 
 var mainWindow *mygo.Window
 
 func init() {
 	attachConsole()
+}
+
+// mustReadIcon reads an embedded UI asset, returning nil when it is missing so
+// the tray falls back to its drawn emblem.
+func mustReadIcon(fsys fs.FS, name string) []byte {
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func main() {
@@ -50,6 +61,12 @@ func main() {
 	newPwdFlag := flag.String("new-pwd", "", "New password when the gateway requires a password change")
 	forceFlag := flag.Bool("force", false, "Force password change even if current password is not expired")
 	httpPort := flag.Int("port", 0, "Serve web UI on custom HTTP port (0 for auto)")
+	certFlag := flag.String("cert", "", "Certificate login: imported certificate ID/alias, or a .p12/.pfx path")
+	certPwdFlag := flag.String("cert-pwd", "", "Private key password for an external certificate file")
+	certTypeFlag := flag.Int("cert-type", 0, "Certificate source: 0 file, 1 Windows system store")
+	listCertsFlag := flag.Bool("list-certs", false, "List installed certificates and exit")
+	importCertFlag := flag.String("import-cert", "", "Import a .p12/.pfx file into the local certificate store and exit")
+	certAliasFlag := flag.String("cert-alias", "", "Display alias used with -import-cert")
 	flag.Parse()
 
 	// Resolve the per-user data directory BEFORE anything loads setting.xml.
@@ -89,8 +106,22 @@ func main() {
 	})
 	vpnService.SetAppVersion(AppVersion)
 
+	// Certificate inventory and import run before any UI/network work.
+	if *listCertsFlag {
+		runListCertificates(vpnService)
+		return
+	}
+	if *importCertFlag != "" {
+		runImportCertificate(vpnService, *importCertFlag, *certAliasFlag, *certPwdFlag)
+		return
+	}
+
 	// CLI Connect Mode
 	if *cliMode && *connectGW != "" {
+		if *certFlag != "" {
+			runCLIConnectWithCert(vpnService, *connectGW, *certFlag, *certPwdFlag, *certTypeFlag, *userFlag, *pwdFlag)
+			return
+		}
 		runCLIConnect(vpnService, *connectGW, *userFlag, *pwdFlag, *newPwdFlag, *forceFlag)
 		return
 	}
@@ -126,11 +157,17 @@ func main() {
 		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:  fmt.Sprintf("V5VPN 现代客户端 %s (MyGo)", AppVersion),
 			Width:  460,
-			Height: 700,
+			Height: 718,
 			URL:    fmt.Sprintf("http://127.0.0.1:%d/index.html", actualPort),
 		})
 		mainWindow = win
 		var isExiting bool
+
+		// The tray mirrors the application icon: the colored shield while a
+		// session is up, a desaturated copy while disconnected.
+		trayIconConnected, trayIconDisconnected := buildTrayIcons(
+			mustReadIcon(uiFS, "icon.png"),
+		)
 
 		if win != nil {
 			log.Printf("V5VPN desktop window opened successfully.")
@@ -179,9 +216,9 @@ func main() {
 			})
 		}
 
-		// Setup System Tray with crisp 32x32 PNG Icon
+		// Setup System Tray with the application icon
 		tray, trayErr := mygo.NewTray(mygo.TrayOptions{
-			Icon:    generateTrayIcon(false),
+			Icon:    trayIconDisconnected,
 			Title:   "V5VPN",
 			ToolTip: "V5VPN 客户端 (未连接)",
 		})
@@ -205,15 +242,15 @@ func main() {
 				statusLabel = fmt.Sprintf("状态: 已连接 [%s]", gwName)
 				isConn = true
 				tray.SetToolTip(fmt.Sprintf("V5VPN - 已连接 [%s]", gwName))
-				_ = tray.SetIcon(generateTrayIcon(true), false)
+				_ = tray.SetIcon(trayIconConnected, false)
 			} else if statusStr == "Connecting" {
 				statusLabel = "状态: 正在连接..."
 				tray.SetToolTip("V5VPN - 正在连接...")
-				_ = tray.SetIcon(generateTrayIcon(false), false)
+				_ = tray.SetIcon(trayIconDisconnected, false)
 			} else {
 				statusLabel = "状态: 未连接"
 				tray.SetToolTip("V5VPN - 未连接")
-				_ = tray.SetIcon(generateTrayIcon(false), false)
+				_ = tray.SetIcon(trayIconDisconnected, false)
 			}
 
 			menuItems := []*mygo.MenuItem{
@@ -289,18 +326,12 @@ func main() {
 				})
 			} else {
 				menuItems = append(menuItems, &mygo.MenuItem{
-					Label: "连接 VPN",
+					Label: "登录 VPN",
 					Click: func(item *mygo.MenuItem, w *mygo.Window) {
-						cfg := vpnService.GetConfig()
-						gw := cfg.FindGateway(cfg.LastUseGateway)
-						if gw != nil && len(gw.SavedAccounts) > 0 {
-							go vpnService.Login(gw.Name, gw.SavedAccounts[0].Username, gw.SavedAccounts[0].Password, "", true, false)
-						} else {
-							if win != nil {
-								win.Show()
-								win.Restore()
-								win.Focus()
-							}
+						if win != nil {
+							win.Show()
+							win.Restore()
+							win.Focus()
 						}
 					},
 				})
@@ -346,9 +377,20 @@ func main() {
 			tray.PopUpMenu()
 		})
 
-		// Update tray reactively on status change without polling
+		// Update tray and notify UI reactively on status change without polling
 		vpnService.OnStatusChange = func(status string) {
-			mygo.RunOnMain(updateTray)
+			mygo.RunOnMain(func() {
+				updateTray()
+				if mainWindow != nil && !mainWindow.IsDestroyed() {
+					if status == "Disconnected" {
+						mainWindow.SetSize(460, 718)
+						page := mainWindow.Page()
+						if page != nil {
+							_, _ = page.Eval("window.onVPNDisconnected && window.onVPNDisconnected()")
+						}
+					}
+				}
+			})
 		}
 	})
 
@@ -399,13 +441,13 @@ func startHTTPServer(port int, uiFS fs.FS, vpnService *service.VPNService) int {
 			mygo.RunOnMain(func() {
 				switch req.Mode {
 				case "login":
-					mainWindow.SetSize(460, 700)
+					mainWindow.SetSize(460, 718)
 					mainWindow.Center()
 				case "connected":
 					mainWindow.SetSize(1248, 832)
 					mainWindow.Center()
 				case "settings":
-					mainWindow.SetSize(720, 620)
+					mainWindow.SetSize(920, 660)
 					mainWindow.Center()
 				}
 			})
@@ -446,6 +488,112 @@ func startHTTPServer(port int, uiFS fs.FS, vpnService *service.VPNService) int {
 		writeLoginResult(w, res, err)
 	})
 
+	mux.HandleFunc("/api/certs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		source := 0
+		if raw := r.URL.Query().Get("source"); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil {
+				source = parsed
+			}
+		}
+		certs, err := vpnService.ListCertificates(source)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(certs)
+	})
+
+	mux.HandleFunc("/api/certs/import", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Path     string `json:"path"`
+			Alias    string `json:"alias"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		info, err := vpnService.ImportCertificate(req.Path, req.Alias, req.Password)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(info)
+	})
+
+	mux.HandleFunc("/api/certs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/certs/")
+		w.Header().Set("Content-Type", "application/json")
+		if err := vpnService.DeleteCertificate(id); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	})
+
+	mux.HandleFunc("/api/login-cert", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			GWID       string `json:"gwId"`
+			Source     int    `json:"source"`
+			CertID     string `json:"certId"`
+			VerifyCode string `json:"verifycode"`
+			Auto       bool   `json:"auto"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := vpnService.LoginWithCert(req.GWID, req.Source, req.CertID, req.VerifyCode, req.Auto)
+		writeLoginResult(w, res, err)
+	})
+
+	// /api/cert/pick opens the native file picker for a .p12/.pfx file. The
+	// dialog needs the GUI process, so it lives in main rather than the service.
+	mux.HandleFunc("/api/cert/pick", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if mainWindow == nil {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "当前以 Web 模式运行，无法打开系统文件对话框，请手动输入证书路径",
+			})
+			return
+		}
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+			Parent: mainWindow,
+			Title:  "选择证书文件",
+			Filters: []mygo.FileFilter{
+				{Name: "证书文件 (*.p12, *.pfx)", Extensions: []string{"p12", "pfx"}},
+			},
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if len(paths) == 0 {
+			_ = json.NewEncoder(w).Encode(map[string]string{"path": ""})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"path": paths[0]})
+	})
+
 	mux.HandleFunc("/api/change-password", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -477,6 +625,21 @@ func startHTTPServer(port int, uiFS fs.FS, vpnService *service.VPNService) int {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	})
+
+	mux.HandleFunc("/api/resources/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		res, err := vpnService.RefreshResources()
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(res)
 	})
 
 	mux.HandleFunc("/api/gateways", func(w http.ResponseWriter, r *http.Request) {
@@ -698,6 +861,116 @@ func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string, fo
 		if service.IsPasswordExpired(err) {
 			fmt.Fprintln(os.Stderr, "口令已过期。请加上 -new-pwd <新密码> 后重试，或在图形界面中修改密码。")
 		}
+		os.Exit(1)
+	}
+
+	fmt.Println("连接成功!")
+	data, _ := json.MarshalIndent(res, "", "  ")
+	fmt.Println(string(data))
+	fmt.Println("\n按 Ctrl+C 退出并断开连接...")
+
+	select {}
+}
+
+// runListCertificates prints both certificate sources. A source that is not
+// available on the current platform is reported instead of failing the whole
+// listing.
+func runListCertificates(svc *service.VPNService) {
+	printed := 0
+	for _, src := range []struct {
+		id   int
+		name string
+	}{
+		{0, "本地文件证书"},
+		{1, "系统证书库"},
+	} {
+		certs, err := svc.ListCertificates(src.id)
+		if err != nil {
+			fmt.Printf("[%s] 不可用: %v\n", src.name, err)
+			continue
+		}
+		fmt.Printf("[%s] 共 %d 张证书:\n", src.name, len(certs))
+		for i, c := range certs {
+			state := "有效"
+			if c.IsExpired {
+				state = "已过期"
+			}
+			fmt.Printf("  [%d] %s\n", i+1, c.Name)
+			fmt.Printf("      ID: %s\n", c.ID)
+			fmt.Printf("      颁发者: %s\n", c.Issuer)
+			fmt.Printf("      有效期: %s 到 %s (%s)\n", c.ValidFrom, c.ValidTo, state)
+			printed++
+		}
+	}
+	if printed == 0 {
+		fmt.Println("\n未找到可用证书。可用 -import-cert <文件> [-cert-alias 别名] [-cert-pwd 口令] 导入。")
+	}
+}
+
+func runImportCertificate(svc *service.VPNService, path, alias, password string) {
+	info, err := svc.ImportCertificate(path, alias, password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "导入证书失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("证书导入成功:")
+	fmt.Printf("  ID: %s\n", info.ID)
+	fmt.Printf("  名称: %s\n", info.Name)
+	fmt.Printf("  颁发者: %s\n", info.Issuer)
+	fmt.Printf("  有效期: %s 到 %s\n", info.ValidFrom, info.ValidTo)
+	fmt.Printf("\n使用 -cli -connect <网关> -cert %s 登录。\n", info.ID)
+}
+
+// runCLIConnectWithCert authenticates with a certificate. -cert either names an
+// imported certificate (ID or alias) or points at a .p12/.pfx file; the latter
+// is loaded in place and never copied into the store.
+func runCLIConnectWithCert(svc *service.VPNService, gwName, certRef, certPwd string, certType int, user, pwd string) {
+	gw := svc.Config.FindGateway(gwName)
+	if gw == nil {
+		fmt.Fprintf(os.Stderr, "未找到网关: %s\n", gwName)
+		os.Exit(1)
+	}
+	if user != "" || pwd != "" {
+		fmt.Fprintln(os.Stderr, "提示: 已指定证书登录，-user/-pwd 将被忽略。")
+	}
+
+	certID := certRef
+	if info, err := os.Stat(certRef); err == nil && !info.IsDir() {
+		fmt.Printf("正在连接网关 %s (%s:%d), 证书: %s...\n", gw.Name, gw.IP, gw.Port, certRef)
+		res, err := svc.LoginWithCertExternal(gw.Name, certRef, certPwd)
+		finishCLIConnect(res, err)
+		return
+	}
+
+	resolvedID, name, err := resolveCertificateRef(svc, certRef, certType)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	certID = resolvedID
+	fmt.Printf("正在连接网关 %s (%s:%d), 证书: %s...\n", gw.Name, gw.IP, gw.Port, name)
+
+	res, err := svc.LoginWithCert(gw.Name, certType, certID, "", false)
+	finishCLIConnect(res, err)
+}
+
+// resolveCertificateRef accepts either a certificate ID or its display alias.
+func resolveCertificateRef(svc *service.VPNService, ref string, certType int) (string, string, error) {
+	certs, err := svc.ListCertificates(certType)
+	if err != nil {
+		return "", "", err
+	}
+	for _, c := range certs {
+		if c.ID == ref || c.Name == ref {
+			return c.ID, c.Name, nil
+		}
+	}
+	return "", "", fmt.Errorf("未找到证书 %q，请先运行 -list-certs 查看可用证书", ref)
+}
+
+func finishCLIConnect(res map[string]any, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "连接失败: %v\n", err)
 		os.Exit(1)
 	}
 

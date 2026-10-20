@@ -24,6 +24,12 @@ type ProxyManager struct {
 	Logger      func(level string, format string, args ...any)
 	mu          sync.Mutex
 	closed      bool
+	// ClientCert is presented during the gateway TLS handshake when the
+	// session was authenticated with a certificate. Gateways that require
+	// client certificates for /vpn/user/auth/cert usually require them for
+	// tunnel connections as well; omitting it here yields a successful login
+	// where every forwarded connection is reset.
+	ClientCert *tls.Certificate
 }
 
 // NewProxyManager creates a new proxy manager
@@ -148,9 +154,9 @@ func (pm *ProxyManager) tunnelTraffic(clientConn net.Conn, targetIP string, targ
 		clientConn.RemoteAddr(), targetIP, targetPort, mapID)
 
 	gwAddr := fmt.Sprintf("%s:%d", pm.GatewayIP, pm.GatewayPort)
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS10,
+	tlsConfig := protocol.GatewayTLSConfig()
+	if pm.ClientCert != nil {
+		tlsConfig.Certificates = []tls.Certificate{*pm.ClientCert}
 	}
 
 	remoteConn, err := tls.Dial("tcp", gwAddr, tlsConfig)

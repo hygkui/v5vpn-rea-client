@@ -5,6 +5,10 @@
   let currentGateway = null;
   let isConnected = false;
   let logPollTimer = null;
+  let authMode = 'password';       // 'password' | 'cert'
+  let certSource = 0;              // 0 file, 1 system store
+  let selectedCertId = '';
+  let certs = [];
 
   // DOM Elements - Views
   const viewLogin = document.getElementById('view-login');
@@ -35,6 +39,23 @@
   const changePasswordBtn = document.getElementById('change-password-btn');
   const cancelChangePasswordBtn = document.getElementById('cancel-change-password-btn');
 
+  // DOM Elements - Authentication Tabs and Certificate Panel
+  const passwordPanel = document.getElementById('password-panel');
+  const certPanel = document.getElementById('cert-panel');
+  const authTabs = Array.from(document.querySelectorAll('.auth-tab'));
+  const certSourceButtons = Array.from(document.querySelectorAll('.cert-source'));
+  const certList = document.getElementById('cert-list');
+  const certRefreshBtn = document.getElementById('cert-refresh-btn');
+  const importCertBtn = document.getElementById('import-cert-btn');
+  const importCertPanel = document.getElementById('import-cert-panel');
+  const importCertPath = document.getElementById('import-cert-path');
+  const importCertAlias = document.getElementById('import-cert-alias');
+  const importCertPwd = document.getElementById('import-cert-pwd');
+  const importCertConfirmBtn = document.getElementById('import-cert-confirm-btn');
+  const importCertCancelBtn = document.getElementById('import-cert-cancel-btn');
+  const browseCertBtn = document.getElementById('browse-cert-btn');
+  const certAutoLoginCheckbox = document.getElementById('cert-auto-login-checkbox');
+
   // DOM Elements - Connected View
   const connectedGwName = document.getElementById('connected-gw-name');
   const connectedChangePwdBtn = document.getElementById('connected-change-pwd-btn');
@@ -42,6 +63,10 @@
   const sessionIpVal = document.getElementById('session-ip-val');
   const sessionIdVal = document.getElementById('session-id-val');
   const resCount = document.getElementById('res-count');
+  const resLoadingBadge = document.getElementById('res-loading-badge');
+  const refreshResourcesBtn = document.getElementById('refresh-resources-btn');
+  const resourceErrorBanner = document.getElementById('resource-error-banner');
+  const resourceErrorText = document.getElementById('resource-error-text');
   const resourcesTbody = document.getElementById('resources-tbody');
   const disconnectBtn = document.getElementById('disconnect-btn');
   const toggleLogsBtn = document.getElementById('toggle-logs-btn');
@@ -54,7 +79,6 @@
   const settingsModal = document.getElementById('settings-modal');
   const closeModalBtn = document.getElementById('close-modal-btn');
   const modalDoneBtn = document.getElementById('modal-done-btn');
-  const reloadOrigBtn = document.getElementById('reload-orig-btn');
   const gatewaysTbody = document.getElementById('gateways-tbody');
   const addGwBtn = document.getElementById('add-gw-btn');
 
@@ -194,6 +218,78 @@
       }
       const res = await fetch('/api/check-updates', { method: 'POST' });
       return await res.json();
+    },
+    async refreshResources() {
+      if (window.VPNService && window.VPNService.refreshResources) {
+        return await window.VPNService.refreshResources();
+      }
+      const res = await fetch('/api/resources/refresh', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '重新拉取资源失败');
+      return data;
+    },
+    async listCerts(source) {
+      if (window.VPNService && window.VPNService.listCertificates) {
+        return await window.VPNService.listCertificates(source);
+      }
+      const res = await fetch(`/api/certs?source=${encodeURIComponent(source)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '读取证书列表失败');
+      return data;
+    },
+    async importCert(path, alias, password) {
+      if (window.VPNService && window.VPNService.importCertificate) {
+        return await window.VPNService.importCertificate(path, alias, password);
+      }
+      const res = await fetch('/api/certs/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, alias, password })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '导入证书失败');
+      return data;
+    },
+    async deleteCert(id) {
+      if (window.VPNService && window.VPNService.deleteCertificate) {
+        return await window.VPNService.deleteCertificate(id);
+      }
+      const res = await fetch(`/api/certs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '删除证书失败');
+      return data;
+    },
+    async pickCertFile() {
+      const res = await fetch('/api/cert/pick', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '无法打开文件选择对话框');
+      return data.path || '';
+    },
+    async loginWithCert(gwId, source, certId, verifycode, auto) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      try {
+        const res = await fetch('/api/login-cert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gwId, source, certId, verifycode, auto }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        const data = await res.json();
+        if (!res.ok) {
+          const error = new Error(data.error || '证书登录失败');
+          error.code = data.code || '';
+          throw error;
+        }
+        return data;
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          throw new Error('网关响应超时(20s)，请检查网络与网关端口连通性');
+        }
+        throw err;
+      }
     }
   };
 
@@ -336,29 +432,58 @@
         usernameInput.value = '';
         passwordInput.value = '';
       }
+
+      restoreAuthPreferences();
     }
   }
 
   gatewaySelect.addEventListener('change', onGatewayChanged);
 
+  // Reload gateway configuration and re-render without resetting active modal or window size
+  async function reloadGatewaysData() {
+    try {
+      config = await api.getConfig();
+      populateGateways(config.gateways, config.lastUseGateway);
+      renderGatewayManagerTable();
+    } catch (err) {
+      console.error('Failed to reload gateways:', err);
+    }
+  }
+
   // Render Gateways Table in Settings Modal
   function renderGatewayManagerTable() {
     if (!config || !config.gateways) return;
     gatewaysTbody.innerHTML = '';
+    if (config.gateways.length === 0) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td colspan="5" class="empty-state" style="padding:24px; text-align:center; color:var(--text-dim);">暂无网关配置，请在下方添加</td>`;
+      gatewaysTbody.appendChild(tr);
+      return;
+    }
     config.gateways.forEach(gw => {
       const tr = document.createElement('tr');
       const users = (gw.savedAccounts || []).map(a => a.username).join(', ') || '-';
       const isSelected = currentGateway && (currentGateway.id === gw.id || currentGateway.name === gw.name);
 
+      tr.className = isSelected ? 'gw-row is-selected-row' : 'gw-row';
       tr.innerHTML = `
-        <td><strong>${escapeHtml(gw.name)}</strong> ${isSelected ? '<span class="algo-pill" style="margin-left:4px;">当前选中</span>' : ''}</td>
-        <td><code>${escapeHtml(gw.ip)}:${gw.port}</code></td>
-        <td><span class="algo-pill">${gw.algo === 1 ? '国密' : '国际标准'}</span></td>
-        <td>${escapeHtml(users)}</td>
+        <td title="${escapeHtml(gw.name)}">
+          <div class="gw-name-cell">
+            <span class="gw-dot ${isSelected ? 'dot-active' : ''}"></span>
+            <strong class="gw-name-text">${escapeHtml(gw.name)}</strong>
+          </div>
+        </td>
+        <td class="gw-ip-cell" title="${escapeHtml(gw.ip)}:${gw.port}">
+          <code class="gw-code">${escapeHtml(gw.ip)}:${gw.port}</code>
+        </td>
+        <td><span class="algo-pill ${gw.algo === 1 ? 'algo-gm' : 'algo-tls'}">${gw.algo === 1 ? '国密 GM' : '国际标准'}</span></td>
+        <td class="gw-users-cell" title="${escapeHtml(users)}">${escapeHtml(users)}</td>
         <td>
           <div class="action-btn-cell">
-            <button class="btn btn-secondary btn-sm select-gw-btn" data-id="${gw.id || gw.name}">使用此网关</button>
-            <button class="btn btn-danger btn-sm delete-gw-btn" data-id="${gw.id || gw.name}">删除</button>
+            ${isSelected 
+              ? '<span class="badge-current-gw">✓ 当前选中</span>' 
+              : `<button class="btn btn-select btn-sm select-gw-btn" data-id="${gw.id || gw.name}">切换</button>`}
+            <button class="btn btn-delete btn-sm delete-gw-btn" data-id="${gw.id || gw.name}" title="删除此网关配置">删除</button>
           </div>
         </td>
       `;
@@ -381,8 +506,7 @@
         const id = e.target.dataset.id;
         if (confirm(`确定删除网关 ${id} 吗？`)) {
           await api.deleteGateway(id);
-          await loadAppConfig();
-          renderGatewayManagerTable();
+          await reloadGatewaysData();
         }
       });
     });
@@ -399,23 +523,23 @@
       alert('请填写网关名称和 IP 地址');
       return;
     }
+    if (name.length > 20) {
+      alert('网关名称过长，请控制在 20 个字符以内');
+      return;
+    }
 
     await api.saveGateway({ name, ip, port, algo });
     document.getElementById('new-gw-name').value = '';
     document.getElementById('new-gw-ip').value = '';
-    await loadAppConfig();
-    renderGatewayManagerTable();
-  });
-
-  // Reload Local Config from setting.xml
-  reloadOrigBtn.addEventListener('click', async () => {
-    await loadAppConfig();
-    renderGatewayManagerTable();
-    alert('已成功从本地 setting.xml 重新同步网关与密码！');
+    await reloadGatewaysData();
   });
 
   // Login Form Submission
   async function handleLogin() {
+    if (authMode === 'cert') {
+      await handleCertLogin();
+      return;
+    }
     const gwId = gatewaySelect.value;
     const username = usernameInput.value.trim();
     const password = passwordInput.value;
@@ -456,7 +580,29 @@
     if (err && err.code === 'bad_credentials') {
       return '网关提示：用户名或密码错误，请检查输入的账号或密码！';
     }
+    if (err && err.code) {
+      const certMsg = friendlyCertError(err.code);
+      if (certMsg) return certMsg;
+    }
     return (err && err.message) || '未知错误';
+  }
+
+  // friendlyCertError maps the backend's stable certificate codes to text.
+  function friendlyCertError(code) {
+    switch (code) {
+      case 'cert_invalid':
+        return '网关提示：证书验证失败，请重新选择证书或确认网关已信任该证书。';
+      case 'cert_unavailable':
+        return '网关提示：该用户或网关未启用证书认证方式。';
+      case 'cert_expired':
+        return '网关提示：证书已过期，请更换证书或联系管理员续期。';
+      case 'cert_revoked':
+        return '网关提示：证书已被注销，请重新选择证书进行认证。';
+      case 'cert_signature':
+        return '网关提示：证书签名错误，请重新选择证书进行认证。';
+      default:
+        return '';
+    }
   }
 
   function showPasswordChangePanel(isVoluntary = false) {
@@ -521,6 +667,232 @@
     }
   }
 
+  // ==================== 证书登录 ====================
+  function setAuthMode(mode) {
+    authMode = mode === 'cert' ? 'cert' : 'password';
+    authTabs.forEach(tab => {
+      const active = tab.dataset.mode === authMode;
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    passwordPanel.style.display = authMode === 'password' ? '' : 'none';
+    certPanel.style.display = authMode === 'cert' ? '' : 'none';
+    hidePasswordChangePanel();
+    hideLoginAlert();
+    updateConnectButtonLabel();
+    if (authMode === 'cert') {
+      loadCertificates();
+    }
+  }
+
+  function updateConnectButtonLabel() {
+    if (connectBtn.disabled) return;
+    connectBtnText.textContent = authMode === 'cert' ? '证书安全连接' : '立即连接';
+  }
+
+  authTabs.forEach(tab => {
+    tab.addEventListener('click', () => setAuthMode(tab.dataset.mode));
+  });
+
+  certSourceButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      certSource = parseInt(btn.dataset.source, 10) || 0;
+      certSourceButtons.forEach(b => b.classList.toggle('is-active', b === btn));
+      selectedCertId = '';
+      // Importing only applies to file certificates; the system store is
+      // managed by the operating system.
+      importCertBtn.style.display = certSource === 0 ? '' : 'none';
+      if (certSource !== 0) {
+        importCertPanel.style.display = 'none';
+        certList.style.display = '';
+      }
+      loadCertificates();
+    });
+  });
+
+  async function loadCertificates() {
+    certList.innerHTML = '<p class="cert-empty">正在检测证书...</p>';
+    try {
+      const list = await api.listCerts(certSource);
+      certs = Array.isArray(list) ? list : [];
+    } catch (err) {
+      certs = [];
+      certList.innerHTML = `<p class="cert-empty">${escapeHtml(err.message || '读取证书列表失败')}</p>`;
+      return;
+    }
+
+    if (certs.length === 0) {
+      const hint = certSource === 0
+        ? '未找到已导入的证书。点击「导入证书」添加 .p12/.pfx 文件。'
+        : '未在系统证书库中找到带私钥的个人证书。';
+      certList.innerHTML = `<p class="cert-empty">${hint}</p>`;
+      return;
+    }
+
+    // Keep the selection stable across refreshes, else preselect the first.
+    if (!certs.some(c => c.id === selectedCertId)) {
+      selectedCertId = certs[0].id;
+    }
+
+    certList.innerHTML = '';
+    certs.forEach(cert => {
+      const item = document.createElement('div');
+      item.className = 'cert-item' + (cert.isExpired ? ' cert-item-expired' : '') +
+        (cert.id === selectedCertId ? ' is-selected' : '');
+      item.dataset.id = cert.id;
+
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'cert-choice';
+      radio.checked = cert.id === selectedCertId;
+      radio.addEventListener('change', () => {
+        selectedCertId = cert.id;
+        certList.querySelectorAll('.cert-item').forEach(el => {
+          el.classList.toggle('is-selected', el.dataset.id === cert.id);
+        });
+      });
+      item.appendChild(radio);
+
+      const main = document.createElement('div');
+      main.className = 'cert-main';
+      main.innerHTML =
+        `<div class="cert-name">${escapeHtml(cert.name || cert.id)}` +
+        (cert.isExpired ? '<span class="cert-badge-expired">已过期</span>' : '') +
+        `</div>` +
+        `<div class="cert-meta">颁发者：${escapeHtml(cert.issuer || '-')}</div>` +
+        `<div class="cert-meta">有效期：${escapeHtml(cert.validFrom || '-')} 到 ${escapeHtml(cert.validTo || '-')}</div>`;
+      item.appendChild(main);
+
+      if (cert.source === 0) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'cert-delete-btn';
+        del.textContent = '删除';
+        del.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm(`确定删除证书「${cert.name || cert.id}」吗？`)) return;
+          try {
+            await api.deleteCert(cert.id);
+            showLoginAlert('证书已删除', 'info');
+          } catch (err) {
+            showLoginAlert(err.message || '删除证书失败', 'error');
+          }
+          await loadCertificates();
+        });
+        item.appendChild(del);
+      }
+
+      item.addEventListener('click', () => {
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change'));
+      });
+
+      certList.appendChild(item);
+    });
+  }
+
+  async function handleCertLogin() {
+    const gwId = gatewaySelect.value;
+    const verifycode = verifycodeInput.value.trim();
+    const auto = certAutoLoginCheckbox.checked;
+
+    if (!gwId) {
+      showLoginAlert('请选择网关节点', 'error');
+      return;
+    }
+    if (!selectedCertId) {
+      showLoginAlert('请先选择一张证书', 'error');
+      return;
+    }
+
+    hideLoginAlert();
+    setConnectingState(true);
+    try {
+      const res = await api.loginWithCert(gwId, certSource, selectedCertId, verifycode, auto);
+      showConnectedView(res);
+    } catch (err) {
+      showLoginAlert(friendlyLoginError(err), 'error');
+      setConnectingState(false);
+      if (err && (err.code === 'cert_expired' || err.code === 'cert_invalid' || err.code === 'cert_revoked')) {
+        loadCertificates();
+      }
+    }
+  }
+
+  certRefreshBtn.addEventListener('click', () => loadCertificates());
+
+  importCertBtn.addEventListener('click', () => {
+    const visible = importCertPanel.style.display !== 'none';
+    importCertPanel.style.display = visible ? 'none' : 'block';
+    certList.style.display = visible ? '' : 'none';
+  });
+
+  importCertCancelBtn.addEventListener('click', () => {
+    importCertPanel.style.display = 'none';
+    certList.style.display = '';
+    importCertPath.value = '';
+    importCertAlias.value = '';
+    importCertPwd.value = '';
+  });
+
+  browseCertBtn.addEventListener('click', async () => {
+    try {
+      const path = await api.pickCertFile();
+      if (path) {
+        importCertPath.value = path;
+      } else {
+        showLoginAlert('未选择证书文件', 'info');
+      }
+    } catch (err) {
+      showLoginAlert((err && err.message) || '无法打开文件选择对话框，请手动输入路径', 'error');
+    }
+  });
+
+  importCertConfirmBtn.addEventListener('click', async () => {
+    const path = importCertPath.value.trim();
+    if (!path) {
+      showLoginAlert('请选择证书文件', 'error');
+      return;
+    }
+    importCertConfirmBtn.disabled = true;
+    importCertConfirmBtn.textContent = '正在导入...';
+    try {
+      const info = await api.importCert(path, importCertAlias.value.trim(), importCertPwd.value);
+      importCertCancelBtn.click();
+      selectedCertId = info.id || '';
+      await loadCertificates();
+      showLoginAlert(`证书「${info.name || info.id}」导入成功`, 'info');
+    } catch (err) {
+      showLoginAlert((err && err.message) || '导入证书失败', 'error');
+    } finally {
+      importCertConfirmBtn.disabled = false;
+      importCertConfirmBtn.textContent = '导入';
+    }
+  });
+
+  // Restore the gateway's remembered authentication mode and certificate.
+  function restoreAuthPreferences() {
+    if (!currentGateway) {
+      setAuthMode('password');
+      return;
+    }
+    if (currentGateway.authType === 1) {
+      certSource = currentGateway.certType === 1 ? 1 : 0;
+      certSourceButtons.forEach(b => {
+        b.classList.toggle('is-active', parseInt(b.dataset.source, 10) === certSource);
+      });
+      if (importCertBtn) {
+        importCertBtn.style.display = certSource === 0 ? '' : 'none';
+      }
+      selectedCertId = currentGateway.selectedCertId || '';
+      certAutoLoginCheckbox.checked = currentGateway.certAutoLogin === true;
+      setAuthMode('cert');
+    } else {
+      setAuthMode('password');
+    }
+  }
+
   loginForm.addEventListener('submit', (e) => {
     e.preventDefault();
     if (passwordChangePanel.style.display !== 'none') {
@@ -529,7 +901,6 @@
     }
     handleLogin();
   });
-
   voluntaryChangePwdLink?.addEventListener('click', (e) => {
     e.preventDefault();
     const gwId = gatewaySelect.value;
@@ -581,7 +952,7 @@
     } else {
       connectBtn.disabled = false;
       connectSpinner.style.display = 'none';
-      connectBtnText.textContent = '立即连接';
+      updateConnectButtonLabel();
     }
   }
 
@@ -605,21 +976,160 @@
     if (currentGateway) {
       connectedGwName.textContent = `${currentGateway.name} (${currentGateway.ip}:${currentGateway.port})`;
     }
-    sessionUserVal.textContent = usernameInput.value.trim() || '-';
+    sessionUserVal.textContent = (info && info.username) || usernameInput.value.trim() || '-';
     if (info) {
       sessionIdVal.textContent = info.sessionId || '-';
       sessionIpVal.textContent = info.loginAddress || (currentGateway ? `${currentGateway.ip}:${currentGateway.port}` : '-');
       renderResources(info.resources || []);
+      // Certificate sessions have no password to change; hide the shortcut.
+      if (connectedChangePwdBtn) {
+        connectedChangePwdBtn.style.display = info.authType === 'certificate' ? 'none' : '';
+      }
+      setResourceState(info.resourceState || 'ready', info.resourceError || '');
+    }
+    startResourcePolling();
+    startStatusPolling();
+  }
+
+  // setResourceState drives the "loading / ready / failed" affordances in the
+  // resource card. A failed fetch keeps the session connected and offers a
+  // retry instead of forcing the user back to the login form.
+  function setResourceState(state, message) {
+    if (resLoadingBadge) {
+      resLoadingBadge.style.display = state === 'loading' ? '' : 'none';
+    }
+    if (refreshResourcesBtn) {
+      refreshResourcesBtn.style.display = state === 'error' ? '' : 'none';
+    }
+    if (resourceErrorBanner) {
+      resourceErrorBanner.style.display = state === 'error' ? 'flex' : 'none';
+    }
+    if (resourceErrorText && state === 'error') {
+      resourceErrorText.textContent = message || '网关未在超时时间内返回资源列表。';
+    }
+    if (state === 'loading') {
+      resourcesTbody.innerHTML = `
+        <tr>
+          <td colspan="6" class="empty-state">
+            <span class="mini-spinner" style="display:inline-block;vertical-align:middle;margin-right:8px;"></span>
+            正在从网关拉取受保护的内网资源，请稍候...
+          </td>
+        </tr>
+      `;
+    } else if (state === 'error' && (!resourcesTbody.children.length || resCount.textContent === '0')) {
+      resourcesTbody.innerHTML = `
+        <tr>
+          <td colspan="6" class="empty-state">资源列表获取失败，VPN 已连接。请点击「重新拉取资源」重试。</td>
+        </tr>
+      `;
     }
   }
+
+  // Resource polling: while loading, poll the status endpoint until the
+  // background fetch finishes or fails.
+  let resourcePollTimer = null;
+  let statusPollTimer = null;
+
+  function startResourcePolling() {
+    stopResourcePolling();
+    let attempts = 0;
+    resourcePollTimer = setInterval(async () => {
+      attempts++;
+      try {
+        const st = await api.getStatus();
+        if (st && st.status === 'Disconnected') {
+          stopResourcePolling();
+          showLoginView();
+          return;
+        }
+        if (!st) {
+          return;
+        }
+        const state = st.resourceState || 'ready';
+        if (state === 'loading') {
+          setResourceState('loading', '');
+          return;
+        }
+        stopResourcePolling();
+        setResourceState(state, st.resourceError || '');
+        if (state === 'ready') {
+          renderResources(st.resources || []);
+        }
+      } catch (_) {
+        if (attempts > 40) stopResourcePolling();
+      }
+    }, 1000);
+  }
+
+  function stopResourcePolling() {
+    if (resourcePollTimer) {
+      clearInterval(resourcePollTimer);
+      resourcePollTimer = null;
+    }
+  }
+
+  function startStatusPolling() {
+    stopStatusPolling();
+    let disconnectedCount = 0;
+    statusPollTimer = setInterval(async () => {
+      if (!isConnected) {
+        stopStatusPolling();
+        return;
+      }
+      try {
+        const st = await api.getStatus();
+        if (st && st.status === 'Disconnected') {
+          disconnectedCount++;
+          if (disconnectedCount >= 2) {
+            showLoginView();
+          }
+        } else {
+          disconnectedCount = 0;
+        }
+      } catch (_) {}
+    }, 1500);
+  }
+
+  function stopStatusPolling() {
+    if (statusPollTimer) {
+      clearInterval(statusPollTimer);
+      statusPollTimer = null;
+    }
+  }
+
+  // Reactive push hook called from Go runtime (e.g. system tray "Disconnect" click)
+  window.onVPNDisconnected = function() {
+    if (isConnected) {
+      showLoginView();
+    }
+  };
+
+  refreshResourcesBtn?.addEventListener('click', async () => {
+    refreshResourcesBtn.disabled = true;
+    refreshResourcesBtn.textContent = '正在重新拉取...';
+    setResourceState('loading', '');
+    try {
+      const res = await api.refreshResources();
+      setResourceState('ready', '');
+      renderResources((res && res.resources) || []);
+    } catch (err) {
+      setResourceState('error', (err && err.message) || '重新拉取资源失败');
+    } finally {
+      refreshResourcesBtn.disabled = false;
+      refreshResourcesBtn.textContent = '🔄 重新拉取资源';
+    }
+  });
 
   // Switch to Login View
   function showLoginView() {
     isConnected = false;
+    stopResourcePolling();
+    stopStatusPolling();
     viewConnected.style.display = 'none';
     viewLogin.style.display = 'flex';
     setConnectingState(false);
     renderResources([]);
+    setResourceState('ready', '');
     api.setWindowSize('login');
   }
 
@@ -735,12 +1245,14 @@
       const st = await api.getStatus();
       if (st && st.status === 'Connected') {
         showConnectedView(st);
-      } else {
+      } else if (settingsModal.style.display !== 'flex') {
         showLoginView();
       }
     } catch (err) {
       console.error('Failed to load app config:', err);
-      showLoginView();
+      if (settingsModal.style.display !== 'flex') {
+        showLoginView();
+      }
     }
   }
 

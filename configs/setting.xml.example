@@ -17,6 +17,12 @@
   <COMMON offRelogin="0" HideToTray="1" LoginDebug="0" language="0" remember="1" autologin="0" trayNotify="0"></COMMON>
   <GATEWAY LastUseGateway="demo-gateway">
     <Gateway0 Name="demo-gateway" Ip="203.0.113.10" Port="443" algo="0">
+      <!--
+        authtype: 0 = password login, 1 = certificate login, 2 = anonymous
+        certtype: 0 = local file cert (.p12/.pfx in certs/), 1 = Windows system store
+        certautologin: 1 = auto-login with certificate
+        certid: optional selected certificate ID or SHA1 fingerprint
+      -->
       <USER LastUserName="alice" authtype="0" certtype="0" certautologin="0">
         <!-- Replace Name with base64("your-username") and Pwd with the
              DES-CBC ciphertext of your password (see crypto.go).

@@ -1,8 +1,10 @@
 package protocol
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +17,37 @@ import (
 
 	"github.com/hygkui/v5vpn-rea-client/internal/crypto"
 )
+
+const (
+	// resourceFetchTimeout bounds one portal integration request. Some gateways
+	// compute the resource list lazily and answer slowly on the first call; a
+	// timeout is reported as a ResourceFetchError and retried rather than
+	// treated as a login failure, because the session cookie is already valid.
+	resourceFetchTimeout = 30 * time.Second
+	// defaultHeartbeatInterval is used until the gateway reports detect_interval.
+	defaultHeartbeatInterval = 180 * time.Second
+	// apiTimeout bounds the lightweight handshake/auth requests.
+	apiTimeout = 30 * time.Second
+)
+
+// ResourceFetchError reports that authentication succeeded but the portal
+// resource list could not be retrieved. The session cookie is valid, so the
+// caller may enter the connected view with an empty list and retry later.
+type ResourceFetchError struct {
+	Err error
+}
+
+func (e *ResourceFetchError) Error() string {
+	return fmt.Sprintf("认证成功，但获取内网资源失败: %v", e.Err)
+}
+
+func (e *ResourceFetchError) Unwrap() error { return e.Err }
+
+// IsResourceFetchError reports whether err means "logged in, resources missing".
+func IsResourceFetchError(err error) bool {
+	var fetchErr *ResourceFetchError
+	return errors.As(err, &fetchErr)
+}
 
 // Client handles network interaction with V5VPN Gateway
 type Client struct {
@@ -30,6 +63,7 @@ type Client struct {
 	stopHeartbeat chan struct{}
 	mu            sync.Mutex
 	isLoggedIn    bool
+	tlsClientCert *tls.Certificate
 }
 
 // NewClient creates a new V5VPN gateway protocol client
@@ -48,17 +82,14 @@ func NewClient(ip string, port int, algo int, logger func(string, string, ...any
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout: 6 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // Internal VPN gateways often use private/self-signed certs
-			MinVersion:         tls.VersionTLS10,
-		},
-		DisableKeepAlives: true,
+		TLSClientConfig:     GatewayTLSConfig(),
+		DisableKeepAlives:   true,
 	}
 
 	httpClient := &http.Client{
 		Transport: tr,
 		Jar:       jar,
-		Timeout:   30 * time.Second,
+		Timeout:   apiTimeout,
 	}
 
 	baseURL := fmt.Sprintf("https://%s:%d", ip, port)
@@ -238,30 +269,133 @@ func (c *Client) authPasswordLocked(username, password, verifycode string) (*Aut
 }
 
 // authenticate posts /vpn/user/auth/password for login authentication. Caller holds c.mu.
+//
+// Authentication and resource retrieval are separate steps: a successful
+// authentication is recorded even when the portal resource list cannot be
+// fetched, so the caller can show the connected view with an empty list and
+// retry with RefreshResources.
 func (c *Client) authenticate(username, password, verifycode string) (*IntegrationInfo, error) {
 	if _, err := c.authPasswordLocked(username, password, verifycode); err != nil {
 		return nil, err
 	}
 
+	c.markLoggedInLocked()
+
 	integration, err := c.fetchIntegrationInfo()
 	if err != nil {
 		c.Logger("ERROR", "Fetch integration info failed: %v", err)
-		return nil, fmt.Errorf("获取内网受保护资源失败: %w", err)
+		return nil, &ResourceFetchError{Err: err}
 	}
 
-	c.Integration = integration
+	c.applyIntegrationLocked(integration)
 	c.Logger("SUCCESS", "Login successful! User: %s, Assigned resources: %d",
 		integration.User.Name, len(integration.ResourceList.TCPUDPResources))
+	return integration, nil
+}
 
+// AuthOnly performs password authentication and marks the session as logged in
+// without waiting for the resource list. It exists so the caller can show the
+// connected view immediately and load resources asynchronously.
+func (c *Client) AuthOnly(username, password, verifycode string) (*AuthResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	resp, err := c.authPasswordLocked(username, password, verifycode)
+	if err != nil {
+		return resp, err
+	}
+	c.markLoggedInLocked()
+	return resp, nil
+}
+
+// AuthCertOnly performs certificate authentication and marks the session as
+// logged in without waiting for the resource list.
+func (c *Client) AuthCertOnly(cert *tls.Certificate, verifycode string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cert != nil {
+		c.installClientCertLocked(cert)
+	}
+	return c.certAuthLocked(verifycode)
+}
+
+// installClientCertLocked wires the certificate into the HTTP transport.
+// Caller holds c.mu.
+func (c *Client) installClientCertLocked(cert *tls.Certificate) {
+	c.tlsClientCert = cert
+	if tr, ok := c.HTTPClient.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+		tr.TLSClientConfig.Certificates = []tls.Certificate{*cert}
+		tr.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return cert, nil
+		}
+	}
+}
+
+// markLoggedInLocked starts the heartbeat without waiting for the resource
+// list, so an unreachable portal does not leave the session unauthenticated.
+// Caller holds c.mu.
+func (c *Client) markLoggedInLocked() {
 	c.isLoggedIn = true
-
-	interval := 180 * time.Second
-	if c.Integration.Session.DetectInterval > 0 {
+	interval := defaultHeartbeatInterval
+	if c.Integration != nil && c.Integration.Session.DetectInterval > 0 {
 		interval = time.Duration(c.Integration.Session.DetectInterval) * time.Second
 	}
 	c.startHeartbeatLoop(interval)
+}
 
-	return c.Integration, nil
+// applyIntegrationLocked stores a fetched resource list. Caller holds c.mu.
+func (c *Client) applyIntegrationLocked(integration *IntegrationInfo) {
+	c.Integration = integration
+}
+
+// FetchIntegration retrieves the portal resource list for the authenticated
+// session and stores it. It is the explicit, retryable half of the login flow.
+func (c *Client) FetchIntegration() (*IntegrationInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.isLoggedIn || c.SessionID == "" {
+		return nil, fmt.Errorf("当前没有有效会话，请重新登录")
+	}
+	integration, err := c.fetchIntegrationInfo()
+	if err != nil {
+		return nil, &ResourceFetchError{Err: err}
+	}
+	c.applyIntegrationLocked(integration)
+	return integration, nil
+}
+
+// RefreshResources re-fetches the portal resource list for an authenticated
+// client. It is used by the UI's "retry" action after a login that
+// authenticated but could not load resources.
+func (c *Client) RefreshResources() (*IntegrationInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.isLoggedIn || c.SessionID == "" {
+		return nil, fmt.Errorf("当前没有有效会话，请重新登录")
+	}
+	integration, err := c.fetchIntegrationInfo()
+	if err != nil {
+		return nil, &ResourceFetchError{Err: err}
+	}
+	c.applyIntegrationLocked(integration)
+	// The gateway may report a different keepalive interval once resources load.
+	c.restartHeartbeatLocked(integration)
+	return integration, nil
+}
+
+// restartHeartbeatLocked swaps the heartbeat interval to the gateway's
+// reported value. Caller holds c.mu.
+func (c *Client) restartHeartbeatLocked(integration *IntegrationInfo) {
+	if integration == nil || integration.Session.DetectInterval <= 0 {
+		return
+	}
+	interval := time.Duration(integration.Session.DetectInterval) * time.Second
+	select {
+	case c.stopHeartbeat <- struct{}{}:
+	default:
+	}
+	c.startHeartbeatLoop(interval)
 }
 
 func (c *Client) postAuth(authBody string) (AuthResponse, []byte, int, error) {
@@ -306,10 +440,15 @@ func (c *Client) captureSession() {
 	}
 }
 
-// fetchIntegrationInfo retrieves the integration.xml containing resources and policies
+// fetchIntegrationInfo retrieves the integration.xml containing resources and policies.
+// It uses its own shorter deadline so a slow portal cannot consume the whole
+// login budget; the session stays valid and the caller can retry.
 func (c *Client) fetchIntegrationInfo() (*IntegrationInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), resourceFetchTimeout)
+	defer cancel()
+
 	reqURL := fmt.Sprintf("%s/vpn/user/portal/intergration.xml?version=2.0", c.BaseURL)
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +466,7 @@ func (c *Client) fetchIntegrationInfo() (*IntegrationInfo, error) {
 	}
 
 	var info IntegrationInfo
-	if err := xml.Unmarshal(data, &info); err != nil {
+	if err := xml.Unmarshal(prepareGatewayXML(data), &info); err != nil {
 		return nil, fmt.Errorf("failed to parse intergration.xml: %w", err)
 	}
 
@@ -364,6 +503,128 @@ func (c *Client) startHeartbeatLoop(interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// SetTLSClientCertificate installs the certificate used for mTLS. The proxy
+// manager reuses the same certificate for the tunnel connections, because a
+// gateway that authenticates clients with certificates usually enforces them on
+// the CONNECT endpoint too.
+func (c *Client) SetTLSClientCertificate(cert *tls.Certificate) {
+	if cert == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tlsClientCert = cert
+	if tr, ok := c.HTTPClient.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+		tr.TLSClientConfig.Certificates = []tls.Certificate{*cert}
+		tr.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return cert, nil
+		}
+	}
+}
+
+// LoginWithCert authenticates with a client certificate at
+// /vpn/user/auth/cert (mutual TLS) and then loads the portal integration info,
+// mirroring Login for password auth.
+//
+// The original client sends a GET request; the RSA/CAPI, file and UKEY variants
+// all use the same endpoint and differ only in how the TLS client certificate
+// is supplied.
+func (c *Client) LoginWithCert(cert *tls.Certificate, verifycode string) (*IntegrationInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if cert != nil {
+		c.installClientCertLocked(cert)
+	}
+	if err := c.certAuthLocked(verifycode); err != nil {
+		return nil, err
+	}
+
+	c.markLoggedInLocked()
+
+	integration, err := c.fetchIntegrationInfo()
+	if err != nil {
+		c.Logger("ERROR", "Fetch integration info failed: %v", err)
+		return nil, &ResourceFetchError{Err: err}
+	}
+
+	c.applyIntegrationLocked(integration)
+	c.Logger("SUCCESS", "Certificate login successful! User: %s, Assigned resources: %d",
+		integration.User.Name, len(integration.ResourceList.TCPUDPResources))
+
+	return integration, nil
+}
+
+// certAuthLocked performs the certificate authentication request and captures
+// the session cookie. Caller holds c.mu.
+func (c *Client) certAuthLocked(verifycode string) error {
+	c.Logger("INFO", "Initiating certificate authentication against %s", c.BaseURL)
+
+	authURL := fmt.Sprintf("%s/vpn/user/auth/cert", c.BaseURL)
+	if verifycode != "" {
+		authURL += "?verifycode=" + url.QueryEscape(verifycode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, authURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "LeadSec VPN Client")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		// A TLS-level failure (unknown CA, no shared cipher, client certificate
+		// rejected) surfaces here rather than as a RESULT code.
+		c.Logger("ERROR", "Certificate auth request failed: %v", err)
+		return fmt.Errorf("证书认证握手失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return fmt.Errorf("读取证书认证响应失败: %w", readErr)
+	}
+	respBody = prepareGatewayXML(respBody)
+	c.Logger("INFO", "Certificate auth response status: %s", resp.Status)
+
+	var authResp AuthResponse
+	parseErr := xml.Unmarshal(respBody, &authResp)
+	if parseErr != nil {
+		c.Logger("WARN", "Certificate auth response was not XML: %s", string(respBody))
+	}
+
+	// The gateway error code is authoritative even with a non-200 status.
+	if parseErr == nil {
+		resultCode := strings.TrimSpace(authResp.Result.Code)
+		if resultCode != "" && !isSuccessCode(resultCode) {
+			authErr := newAuthError(resultCode, authResp.Result.Msg)
+			c.Logger("ERROR", "Gateway rejected certificate authentication: %s", authErr.Error())
+			return authErr
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("证书登录失败，HTTP 状态 %d: %s", resp.StatusCode, string(respBody))
+	}
+	if parseErr != nil {
+		return fmt.Errorf("证书登录响应无法解析: %w", parseErr)
+	}
+
+	c.captureSession()
+	if c.SessionID == "" {
+		c.Logger("ERROR", "No valid Session ID received after certificate auth. Response: %s", string(respBody))
+		return fmt.Errorf("证书登录未下发有效会话ID")
+	}
+	return nil
+}
+
+// ClientCertificate returns the certificate installed for mTLS, or nil.
+func (c *Client) ClientCertificate() *tls.Certificate {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tlsClientCert
 }
 
 // Logout sends logout notification and tears down session

@@ -16,8 +16,8 @@
           <div class="brand-logo-wrap">
             <img src="icon.png" width="68" height="68" alt="V5VPN Logo" class="brand-img">
           </div>
-          <h1 class="brand-title">V5VPN 客户端 <span class="version-badge">v0.2.1</span></h1>
-          <p class="brand-subtitle">安全应用层 SSL-VPN 代理系统</p>
+          <h1 class="brand-title">V5VPN 客户端 <span class="version-badge">v0.3.0</span></h1>
+          <p class="brand-subtitle">现代跨平台 SSL-VPN 客户端</p>
         </div>
 
         <div id="login-alert" class="alert-box" style="display: none;"></div>
@@ -38,6 +38,14 @@
             </div>
           </div>
 
+          <!-- 认证方式切换 -->
+          <div class="auth-tabs" role="tablist" aria-label="登录方式">
+            <button type="button" class="auth-tab is-active" data-mode="password" role="tab" aria-selected="true">👤 口令登录</button>
+            <button type="button" class="auth-tab" data-mode="cert" role="tab" aria-selected="false">🪪 证书登录</button>
+          </div>
+
+          <!-- 口令登录面板 -->
+          <div id="password-panel">
           <!-- 用户名 -->
           <div class="form-group">
             <label for="username-input">用户名：</label>
@@ -75,6 +83,62 @@
             </label>
             <a href="javascript:void(0)" id="voluntary-change-pwd-link" class="voluntary-change-pwd-link" style="margin-left: auto; font-size: 13px; color: #3b82f6; text-decoration: none; cursor: pointer;">修改密码</a>
           </div>
+          </div><!-- /password-panel -->
+
+          <!-- 证书登录面板 -->
+          <div id="cert-panel" style="display: none;">
+            <div class="form-group">
+              <div class="label-row">
+                <label>证书来源：</label>
+                <button type="button" id="cert-refresh-btn" class="settings-trigger-btn" title="重新检测证书">🔄 重新检测</button>
+              </div>
+              <div class="cert-source-tabs">
+                <button type="button" class="cert-source is-active" data-source="0">文件证书</button>
+                <button type="button" class="cert-source" data-source="1">系统证书库</button>
+                <button type="button" class="cert-source is-disabled" data-source="2" disabled title="USB Key 证书登录即将支持">USB Key</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <div class="label-row">
+                <label>选择证书：</label>
+                <button type="button" id="import-cert-btn" class="settings-trigger-btn" title="从 .p12/.pfx 文件导入证书">＋ 导入证书</button>
+              </div>
+              <div id="cert-list" class="cert-list">
+                <p class="cert-empty">正在检测证书...</p>
+              </div>
+            </div>
+
+            <!-- 导入证书表单 -->
+            <div id="import-cert-panel" class="import-panel" style="display: none;">
+              <div class="form-group">
+                <label for="import-cert-path">证书文件：</label>
+                <div class="import-path-row">
+                  <input type="text" id="import-cert-path" class="form-control" placeholder="选择或输入 .p12/.pfx 文件路径">
+                  <button type="button" id="browse-cert-btn" class="btn btn-secondary btn-sm">浏览...</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="import-cert-alias">显示名称（可选）：</label>
+                <input type="text" id="import-cert-alias" class="form-control" placeholder="默认使用证书名称">
+              </div>
+              <div class="form-group">
+                <label for="import-cert-pwd">证书口令：</label>
+                <input type="password" id="import-cert-pwd" class="form-control" placeholder="无口令可留空" autocomplete="off">
+              </div>
+              <div class="password-change-actions">
+                <button type="button" id="import-cert-confirm-btn" class="btn btn-primary">导入</button>
+                <button type="button" id="import-cert-cancel-btn" class="btn btn-secondary">取消</button>
+              </div>
+            </div>
+
+            <div class="form-options">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cert-auto-login-checkbox">
+                <span>证书自动登录</span>
+              </label>
+            </div>
+          </div><!-- /cert-panel -->
 
           <!-- 登录按钮 -->
           <div class="action-btn-row">
@@ -103,7 +167,7 @@
         </form>
 
         <div class="login-footer">
-          <span>V5VPN Client <span class="app-version-text">v0.2.1</span> &bull; 免驱应用层隧道架构</span>
+          <span>V5VPN Client <span class="app-version-text">v0.3.0</span> &bull; 开源跨平台客户端</span>
           <div class="footer-links">
             <a href="https://github.com/hygkui/v5vpn-rea-client" class="github-link js-open-external" data-url="https://github.com/hygkui/v5vpn-rea-client" title="在浏览器中打开 GitHub 仓库">
             <svg class="github-icon" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -113,6 +177,7 @@
             <button type="button" class="github-link js-check-updates" title="检查是否有新版本">⬇ 检查更新</button>
           </div>
         </div>
+      </div>
     </div>
   </div>
 
@@ -123,7 +188,7 @@
       <div class="header-brand">
         <img src="icon.png" width="38" height="38" alt="Logo" class="header-logo">
         <div class="header-titles">
-          <div class="header-main-title">V5VPN 安全隧道 <span class="version-badge">v0.2.1</span></div>
+          <div class="header-main-title">V5VPN 安全隧道 <span class="version-badge">v0.3.0</span></div>
           <div class="header-sub-meta">
             <span class="live-dot"></span>
             <span id="connected-gw-name">已连接</span>
@@ -175,8 +240,22 @@
           <div class="card-title-group">
             <h2 class="card-title">受保护的内网资源</h2>
             <span class="badge badge-primary"><span id="res-count">0</span> 个资源</span>
+            <span id="res-loading-badge" class="badge badge-loading" style="display: none;">
+              <span class="mini-spinner"></span> 正在拉取资源...
+            </span>
           </div>
-          <button id="toggle-logs-btn" class="btn btn-secondary btn-sm">📋 运行日志</button>
+          <div class="header-action-group">
+            <button id="refresh-resources-btn" class="btn btn-secondary btn-sm" style="display: none;">🔄 重新拉取资源</button>
+            <button id="toggle-logs-btn" class="btn btn-secondary btn-sm">📋 运行日志</button>
+          </div>
+        </div>
+
+        <div id="resource-error-banner" class="resource-error-banner" style="display: none;">
+          <span class="resource-error-icon">⚠️</span>
+          <div class="resource-error-body">
+            <strong>已连接 VPN，但获取内网资源失败</strong>
+            <div id="resource-error-text" class="resource-error-detail"></div>
+          </div>
         </div>
 
         <div class="table-container">
@@ -225,7 +304,7 @@
 
     <!-- 底部 GitHub 开源入口 -->
     <footer class="connected-footer">
-      <span>V5VPN Client <span class="app-version-text">v0.2.1</span> &bull; 免驱应用层隧道架构</span>
+      <span>V5VPN Client <span class="app-version-text">v0.3.0</span> &bull; 开源跨平台客户端</span>
       <span class="footer-sep">&bull;</span>
       <a href="https://github.com/hygkui/v5vpn-rea-client" class="github-link js-open-external" data-url="https://github.com/hygkui/v5vpn-rea-client" title="在浏览器中打开 GitHub 仓库">
         <svg class="github-icon" viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -247,7 +326,6 @@
       <div class="modal-body">
         <div class="modal-section-header">
           <h4>已保存的网关列表</h4>
-          <button id="reload-orig-btn" class="btn btn-secondary btn-sm">从 setting.xml 重新同步</button>
         </div>
 
         <div class="table-container modal-table">
@@ -266,11 +344,11 @@
         </div>
 
         <div class="add-gw-card">
-          <h4>添加新网关配置</h4>
+          <h4>➕ 添加新网关</h4>
           <div class="gw-inputs-grid">
-            <input type="text" id="new-gw-name" class="form-control" placeholder="网关名称 (如: 测试节点)">
-            <input type="text" id="new-gw-ip" class="form-control" placeholder="网关 IP 或域名">
-            <input type="number" id="new-gw-port" class="form-control" placeholder="端口" value="443">
+            <input type="text" id="new-gw-name" class="form-control" placeholder="网关名称 (最多20字)" maxlength="20">
+            <input type="text" id="new-gw-ip" class="form-control" placeholder="网关 IP 或域名" maxlength="64">
+            <input type="number" id="new-gw-port" class="form-control" placeholder="端口" value="443" min="1" max="65535">
             <select id="new-gw-algo" class="form-control">
               <option value="0">国际标准 TLS</option>
               <option value="1">国密 GM/SM</option>

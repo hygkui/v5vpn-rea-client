@@ -21,6 +21,14 @@ const (
 	AuthKindBadCredentials
 	AuthKindPasswordExpired
 	AuthKindVerifyCode
+	// Certificate authentication rejections (0x103-0x108, 0x162). Codes come
+	// from language.xml TAG 259-264 and 354; do not infer meaning from the
+	// numeric order.
+	AuthKindCertInvalid
+	AuthKindCertUnavailable
+	AuthKindCertExpired
+	AuthKindCertRevoked
+	AuthKindCertBadSignature
 )
 
 const (
@@ -33,6 +41,14 @@ const (
 	// original client still reports it as a credential error.
 	codeDecryptFailed = 0x8000001A
 	codeVerifyCode    = 0x66600011
+
+	// Certificate authentication results.
+	codeCertVerifyFailed = 0x103 // TAG 259 证书验证失败
+	codeCertUnavailable  = 0x105 // TAG 261 证书认证不可用
+	codeCertExpired      = 0x106 // TAG 262 证书已过期
+	codeCertRevoked      = 0x107 // TAG 263 证书已被注销
+	codeCertBadSignature = 0x108 // TAG 264 证书签名错误
+	codeCertFailed       = 0x162 // TAG 354 证书认证失败（超期或验证失败）
 )
 
 // AuthError is a gateway authentication rejection with a stable kind.
@@ -67,6 +83,31 @@ func (e *AuthError) Error() string {
 			msg = "需要图形验证码"
 		}
 		return fmt.Sprintf("登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
+	case AuthKindCertInvalid:
+		if msg == "" {
+			msg = "证书验证失败，请重新选择证书进行认证"
+		}
+		return fmt.Sprintf("证书登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
+	case AuthKindCertUnavailable:
+		if msg == "" {
+			msg = "网关未启用以证书方式登录"
+		}
+		return fmt.Sprintf("证书登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
+	case AuthKindCertExpired:
+		if msg == "" {
+			msg = "证书已过期，请重新选择证书进行认证"
+		}
+		return fmt.Sprintf("证书登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
+	case AuthKindCertRevoked:
+		if msg == "" {
+			msg = "证书已被注销，请重新选择证书进行认证"
+		}
+		return fmt.Sprintf("证书登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
+	case AuthKindCertBadSignature:
+		if msg == "" {
+			msg = "证书签名错误，请重新选择证书进行认证"
+		}
+		return fmt.Sprintf("证书登录失败: %s (错误代码: %s)", msg, displayCode(e.Code))
 	default:
 		if msg == "" {
 			msg = "网关拒绝登录认证"
@@ -108,8 +149,34 @@ func classifyAuth(code, _ string) AuthKind {
 		return AuthKindBadCredentials
 	case codeVerifyCode:
 		return AuthKindVerifyCode
+	case codeCertVerifyFailed, codeCertFailed:
+		return AuthKindCertInvalid
+	case codeCertUnavailable:
+		return AuthKindCertUnavailable
+	case codeCertExpired:
+		return AuthKindCertExpired
+	case codeCertRevoked:
+		return AuthKindCertRevoked
+	case codeCertBadSignature:
+		return AuthKindCertBadSignature
 	default:
 		return AuthKindOther
+	}
+}
+
+// IsCertAuthError reports whether err is a certificate-authentication
+// rejection, so callers never offer a password change for it.
+func IsCertAuthError(err error) bool {
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		return false
+	}
+	switch authErr.Kind {
+	case AuthKindCertInvalid, AuthKindCertUnavailable, AuthKindCertExpired,
+		AuthKindCertRevoked, AuthKindCertBadSignature:
+		return true
+	default:
+		return false
 	}
 }
 

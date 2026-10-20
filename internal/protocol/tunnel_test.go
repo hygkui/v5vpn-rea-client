@@ -50,12 +50,7 @@ func TestTunnelConnectBastion(t *testing.T) {
 	t.Logf("Acquired session ID: %s", sessionID)
 
 	gwAddr := fmt.Sprintf("%s:%d", gwIP, gwPort)
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS10,
-	}
-
-	conn, err := tls.Dial("tcp", gwAddr, tlsConfig)
+	conn, err := tls.Dial("tcp", gwAddr, GatewayTLSConfig())
 	if err != nil {
 		t.Skipf("TLS dial to gateway failed: %v", err)
 	}

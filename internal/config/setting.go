@@ -49,11 +49,15 @@ type GatewayXML struct {
 }
 
 type UserList struct {
-	LastUserName  string    `xml:"LastUserName,attr"`
-	AuthType      int       `xml:"authtype,attr"`
-	CertType      int       `xml:"certtype,attr"`
-	CertAutoLogin int       `xml:"certautologin,attr"`
-	Users         []UserXML `xml:",any"`
+	LastUserName  string `xml:"LastUserName,attr"`
+	AuthType      int    `xml:"authtype,attr"`
+	CertType      int    `xml:"certtype,attr"`
+	CertAutoLogin int    `xml:"certautologin,attr"`
+	// CertID records the certificate selected for certificate login. The
+	// original client has no such attribute; it is omitted when empty so the
+	// file stays readable by it.
+	CertID string    `xml:"certid,attr,omitempty"`
+	Users  []UserXML `xml:",any"`
 }
 
 type UserXML struct {
@@ -74,13 +78,17 @@ type UserAccount struct {
 
 // GatewayProfile represents a VPN Gateway configuration
 type GatewayProfile struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name"`
-	IP            string        `json:"ip"`
-	Port          int           `json:"port"`
-	Algo          int           `json:"algo"` // 0: Standard, 1: 国密
-	LastUserName  string        `json:"lastUserName"`
-	SavedAccounts []UserAccount `json:"savedAccounts"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	IP             string        `json:"ip"`
+	Port           int           `json:"port"`
+	Algo           int           `json:"algo"` // 0: Standard, 1: 国密
+	LastUserName   string        `json:"lastUserName"`
+	AuthType       int           `json:"authType"`      // 0: password, 1: certificate, 2: anonymous
+	CertType       int           `json:"certType"`      // 0: file, 1: system store, 2: USB key
+	CertAutoLogin  bool          `json:"certAutoLogin"` // remember the certificate login
+	SelectedCertID string        `json:"selectedCertId"`
+	SavedAccounts  []UserAccount `json:"savedAccounts"`
 }
 
 // AppConfig represents application settings used by the client
@@ -198,13 +206,17 @@ func LoadSettingXML(path string) (*AppConfig, error) {
 		}
 
 		profile := GatewayProfile{
-			ID:            id,
-			Name:          name,
-			IP:            gw.IP,
-			Port:          gw.Port,
-			Algo:          gw.Algo,
-			LastUserName:  gw.User.LastUserName,
-			SavedAccounts: make([]UserAccount, 0, len(gw.User.Users)),
+			ID:             id,
+			Name:           name,
+			IP:             gw.IP,
+			Port:           gw.Port,
+			Algo:           gw.Algo,
+			LastUserName:   gw.User.LastUserName,
+			AuthType:       gw.User.AuthType,
+			CertType:       gw.User.CertType,
+			CertAutoLogin:  gw.User.CertAutoLogin == 1,
+			SelectedCertID: gw.User.CertID,
+			SavedAccounts:  make([]UserAccount, 0, len(gw.User.Users)),
 		}
 
 		for _, u := range gw.User.Users {
@@ -267,8 +279,12 @@ func (cfg *AppConfig) saveToPath(targetPath string) error {
 			Port:    gw.Port,
 			Algo:    gw.Algo,
 			User: UserList{
-				LastUserName: gw.LastUserName,
-				Users:        make([]UserXML, 0, len(gw.SavedAccounts)),
+				LastUserName:  gw.LastUserName,
+				AuthType:      gw.AuthType,
+				CertType:      gw.CertType,
+				CertAutoLogin: boolToInt(gw.CertAutoLogin),
+				CertID:        gw.SelectedCertID,
+				Users:         make([]UserXML, 0, len(gw.SavedAccounts)),
 			},
 		}
 
