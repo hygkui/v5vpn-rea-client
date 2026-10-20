@@ -23,17 +23,15 @@ type Source int
 const (
 	// SourceFile is a PKCS#12 (.p12/.pfx) file managed by this client.
 	SourceFile Source = 0
-	// SourceSystem is the operating system's personal certificate store.
-	SourceSystem Source = 1
 	// SourceUSBKey is reserved for hardware tokens; not implemented yet.
+	// The value 1 (the original client's system store) is no longer served.
 	SourceUSBKey Source = 2
 )
 
 // Errors surfaced to the UI/CLI. Wrap them with %w when adding context.
 var (
-	ErrCertNotFound           = errors.New("证书不存在，请刷新证书列表")
-	ErrSystemStoreUnsupported = errors.New("当前平台不支持系统证书库")
-	ErrUSBKeyUnsupported      = errors.New("USB Key 证书登录暂未支持")
+	ErrCertNotFound      = errors.New("证书不存在，请刷新证书列表")
+	ErrUSBKeyUnsupported = errors.New("USB Key 证书登录暂未支持")
 )
 
 // CertInfo is the frontend/CLI view of an installed client certificate.
@@ -50,8 +48,7 @@ type CertInfo struct {
 }
 
 // Store manages certificates installed for this client. File certificates are
-// kept as PKCS#12 files under Dir using the original client's naming scheme;
-// system certificates are read from the platform store and need no directory.
+// kept as PKCS#12 files under Dir using the original client's naming scheme.
 type Store struct {
 	dir string
 }
@@ -72,18 +69,16 @@ func NewStore(dir string) (*Store, error) {
 func (s *Store) Dir() string { return s.dir }
 
 // List returns the certificates available for the requested source, sorted by
-// display name. An unsupported source returns ErrUSBKeyUnsupported or
-// ErrSystemStoreUnsupported; the UI hides those entries in that case.
+// display name. An unsupported source returns ErrUSBKeyUnsupported; the UI
+// hides those entries in that case.
 func (s *Store) List(source Source) ([]CertInfo, error) {
 	switch source {
 	case SourceFile:
 		return s.listFiles()
-	case SourceSystem:
-		return listSystemCerts()
 	case SourceUSBKey:
 		return nil, ErrUSBKeyUnsupported
 	default:
-		return nil, fmt.Errorf("unknown certificate source %d", source)
+		return nil, fmt.Errorf("不支持的证书来源 %d（系统证书库已移除，请使用导入的文件证书）", source)
 	}
 }
 
@@ -138,8 +133,7 @@ func (s *Store) ImportFile(srcPath, alias, password string) (*CertInfo, error) {
 	return &info, nil
 }
 
-// Delete removes a file certificate by ID. System certificates cannot be
-// deleted from the OS store by this client.
+// Delete removes a file certificate by ID.
 func (s *Store) Delete(id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -184,12 +178,10 @@ func (s *Store) LoadTLS(id string, source Source) (*tls.Certificate, error) {
 			return nil, fmt.Errorf("解析证书失败（口令可能已损坏）: %w", err)
 		}
 		return buildTLSCertificate(cert, priv, caCerts), nil
-	case SourceSystem:
-		return loadSystemCert(id)
 	case SourceUSBKey:
 		return nil, ErrUSBKeyUnsupported
 	default:
-		return nil, fmt.Errorf("unknown certificate source %d", source)
+		return nil, fmt.Errorf("不支持的证书来源 %d（系统证书库已移除，请使用导入的文件证书）", source)
 	}
 }
 

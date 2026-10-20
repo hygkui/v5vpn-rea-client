@@ -6,7 +6,6 @@
   let isConnected = false;
   let logPollTimer = null;
   let authMode = 'password';       // 'password' | 'cert'
-  let certSource = 0;              // 0 file, 1 system store
   let selectedCertId = '';
   let certs = [];
 
@@ -43,7 +42,6 @@
   const passwordPanel = document.getElementById('password-panel');
   const certPanel = document.getElementById('cert-panel');
   const authTabs = Array.from(document.querySelectorAll('.auth-tab'));
-  const certSourceButtons = Array.from(document.querySelectorAll('.cert-source'));
   const certList = document.getElementById('cert-list');
   const certRefreshBtn = document.getElementById('cert-refresh-btn');
   const importCertBtn = document.getElementById('import-cert-btn');
@@ -694,27 +692,10 @@
     tab.addEventListener('click', () => setAuthMode(tab.dataset.mode));
   });
 
-  certSourceButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (btn.disabled) return;
-      certSource = parseInt(btn.dataset.source, 10) || 0;
-      certSourceButtons.forEach(b => b.classList.toggle('is-active', b === btn));
-      selectedCertId = '';
-      // Importing only applies to file certificates; the system store is
-      // managed by the operating system.
-      importCertBtn.style.display = certSource === 0 ? '' : 'none';
-      if (certSource !== 0) {
-        importCertPanel.style.display = 'none';
-        certList.style.display = '';
-      }
-      loadCertificates();
-    });
-  });
-
   async function loadCertificates() {
     certList.innerHTML = '<p class="cert-empty">正在检测证书...</p>';
     try {
-      const list = await api.listCerts(certSource);
+      const list = await api.listCerts(0);
       certs = Array.isArray(list) ? list : [];
     } catch (err) {
       certs = [];
@@ -723,10 +704,7 @@
     }
 
     if (certs.length === 0) {
-      const hint = certSource === 0
-        ? '未找到已导入的证书。点击「导入证书」添加 .p12/.pfx 文件。'
-        : '未在系统证书库中找到带私钥的个人证书。';
-      certList.innerHTML = `<p class="cert-empty">${hint}</p>`;
+      certList.innerHTML = '<p class="cert-empty">未找到已导入的证书。点击「导入证书」添加 .p12/.pfx 文件。</p>';
       return;
     }
 
@@ -809,7 +787,7 @@
     hideLoginAlert();
     setConnectingState(true);
     try {
-      const res = await api.loginWithCert(gwId, certSource, selectedCertId, verifycode, auto);
+      const res = await api.loginWithCert(gwId, 0, selectedCertId, verifycode, auto);
       showConnectedView(res);
     } catch (err) {
       showLoginAlert(friendlyLoginError(err), 'error');
@@ -878,13 +856,6 @@
       return;
     }
     if (currentGateway.authType === 1) {
-      certSource = currentGateway.certType === 1 ? 1 : 0;
-      certSourceButtons.forEach(b => {
-        b.classList.toggle('is-active', parseInt(b.dataset.source, 10) === certSource);
-      });
-      if (importCertBtn) {
-        importCertBtn.style.display = certSource === 0 ? '' : 'none';
-      }
       selectedCertId = currentGateway.selectedCertId || '';
       certAutoLoginCheckbox.checked = currentGateway.certAutoLogin === true;
       setAuthMode('cert');

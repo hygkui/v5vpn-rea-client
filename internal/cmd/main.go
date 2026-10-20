@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo"
+	"github.com/hygkui/v5vpn-rea-client/internal/certstore"
 	"github.com/hygkui/v5vpn-rea-client/internal/config"
 	"github.com/hygkui/v5vpn-rea-client/internal/service"
 )
@@ -63,7 +64,7 @@ func main() {
 	httpPort := flag.Int("port", 0, "Serve web UI on custom HTTP port (0 for auto)")
 	certFlag := flag.String("cert", "", "Certificate login: imported certificate ID/alias, or a .p12/.pfx path")
 	certPwdFlag := flag.String("cert-pwd", "", "Private key password for an external certificate file")
-	certTypeFlag := flag.Int("cert-type", 0, "Certificate source: 0 file, 1 Windows system store")
+	certTypeFlag := flag.Int("cert-type", 0, "Certificate source: 0 imported file (2 USB key, not yet supported)")
 	listCertsFlag := flag.Bool("list-certs", false, "List installed certificates and exit")
 	importCertFlag := flag.String("import-cert", "", "Import a .p12/.pfx file into the local certificate store and exit")
 	certAliasFlag := flag.String("cert-alias", "", "Display alias used with -import-cert")
@@ -872,37 +873,25 @@ func runCLIConnect(svc *service.VPNService, gwName, user, pwd, newPwd string, fo
 	select {}
 }
 
-// runListCertificates prints both certificate sources. A source that is not
-// available on the current platform is reported instead of failing the whole
-// listing.
+// runListCertificates prints the imported file certificates.
 func runListCertificates(svc *service.VPNService) {
-	printed := 0
-	for _, src := range []struct {
-		id   int
-		name string
-	}{
-		{0, "本地文件证书"},
-		{1, "系统证书库"},
-	} {
-		certs, err := svc.ListCertificates(src.id)
-		if err != nil {
-			fmt.Printf("[%s] 不可用: %v\n", src.name, err)
-			continue
-		}
-		fmt.Printf("[%s] 共 %d 张证书:\n", src.name, len(certs))
-		for i, c := range certs {
-			state := "有效"
-			if c.IsExpired {
-				state = "已过期"
-			}
-			fmt.Printf("  [%d] %s\n", i+1, c.Name)
-			fmt.Printf("      ID: %s\n", c.ID)
-			fmt.Printf("      颁发者: %s\n", c.Issuer)
-			fmt.Printf("      有效期: %s 到 %s (%s)\n", c.ValidFrom, c.ValidTo, state)
-			printed++
-		}
+	certs, err := svc.ListCertificates(int(certstore.SourceFile))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "读取证书列表失败: %v\n", err)
+		os.Exit(1)
 	}
-	if printed == 0 {
+	fmt.Printf("[本地文件证书] 共 %d 张证书:\n", len(certs))
+	for i, c := range certs {
+		state := "有效"
+		if c.IsExpired {
+			state = "已过期"
+		}
+		fmt.Printf("  [%d] %s\n", i+1, c.Name)
+		fmt.Printf("      ID: %s\n", c.ID)
+		fmt.Printf("      颁发者: %s\n", c.Issuer)
+		fmt.Printf("      有效期: %s 到 %s (%s)\n", c.ValidFrom, c.ValidTo, state)
+	}
+	if len(certs) == 0 {
 		fmt.Println("\n未找到可用证书。可用 -import-cert <文件> [-cert-alias 别名] [-cert-pwd 口令] 导入。")
 	}
 }

@@ -74,7 +74,7 @@
 |:---|:---|
 | 已在其中完成端到端验证的原厂客户端 | 5.3.3.x 系列 |
 | 网关协议版本 | v2.0 (`/vpn/version.xml` 返回 `major=2 minor=0`) |
-| 支持的登录方式 | 口令登录 (`/vpn/user/auth/password`)、证书登录 (`/vpn/user/auth/cert`，支持本地 `.p12/.pfx` 文件证书及 Windows 系统证书库) |
+| 支持的登录方式 | 口令登录 (`/vpn/user/auth/password`)、证书登录 (`/vpn/user/auth/cert`，支持本地 `.p12/.pfx` 文件证书导入) |
 | 未支持 | USB Key 智能卡硬件认证（开发中）、匿名登录、国密(SM2/SM3/SM4)套件、IPsec/NDIS 虚拟网卡模式 |
 
 本项目仅实现「SSL VPN 门户 + HTTP CONNECT 隧道透传」这条路径，
@@ -132,7 +132,7 @@ http://127.0.0.1:45678
 #### 证书登录与证书管理：
 
 ```bash
-# 查看本地已导入及系统证书库中的所有可用证书：
+# 查看本地已导入的所有可用证书：
 .\v5vpn-rea.exe -list-certs
 
 # 导入 .p12 或 .pfx 客户端证书文件：
@@ -143,9 +143,6 @@ http://127.0.0.1:45678
 
 # 使用外部未导入证书文件直连网关：
 .\v5vpn-rea.exe -cli -connect "<gateway-name>" -cert "path/to/cert.p12" -cert-pwd "证书密码"
-
-# 使用 Windows 系统证书库证书登录（-cert-type 1，-cert 传指纹或 CN）：
-.\v5vpn-rea.exe -cli -connect "<gateway-name>" -cert-type 1 -cert "<SHA1-fingerprint>"
 ```
 
 ---
@@ -155,7 +152,7 @@ http://127.0.0.1:45678
 ```
 v5vpn-rea/
 ├── internal/             # 内部 Go 源码（不对外暴露 import 路径）
-│   ├── certstore/        # 客户端证书存储与 Windows 系统证书库管理
+│   ├── certstore/        # 客户端证书存储（.p12/.pfx 导入、解析与管理）
 │   ├── cmd/              # 入口程序 (MyGo 桌面窗口生命周期、系统托盘、CLI分发)
 │   │   └── ui/           # 嵌入式响应式前端界面 (HTML5 / CSS3 / ES6)
 │   ├── config/           # 配置文件解析与本地凭证导入 (setting.xml)

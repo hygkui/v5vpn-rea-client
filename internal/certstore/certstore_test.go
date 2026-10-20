@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -217,18 +216,5 @@ func TestLoadTLSFileOutsideStore(t *testing.T) {
 	}
 	if _, err := LoadTLSFile(path, "bad"); err == nil {
 		t.Fatal("expected failure with wrong password")
-	}
-}
-
-func TestSystemStoreUnsupportedOnNonWindows(t *testing.T) {
-	if strings.Contains(strings.ToLower(os.Getenv("GOOS")), "windows") {
-		t.Skip("windows host")
-	}
-	store, err := NewStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	if _, err := store.List(SourceSystem); err == nil {
-		t.Skip("this platform exposes a system certificate store")
 	}
 }

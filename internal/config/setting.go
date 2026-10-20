@@ -85,7 +85,7 @@ type GatewayProfile struct {
 	Algo           int           `json:"algo"` // 0: Standard, 1: 国密
 	LastUserName   string        `json:"lastUserName"`
 	AuthType       int           `json:"authType"`      // 0: password, 1: certificate, 2: anonymous
-	CertType       int           `json:"certType"`      // 0: file, 1: system store, 2: USB key
+	CertType       int           `json:"certType"`      // 0: file, 2: USB key (1 was the system store, removed)
 	CertAutoLogin  bool          `json:"certAutoLogin"` // remember the certificate login
 	SelectedCertID string        `json:"selectedCertId"`
 	SavedAccounts  []UserAccount `json:"savedAccounts"`
