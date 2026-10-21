@@ -23,6 +23,7 @@ REDACT_LOCAL.txt
 
 # Local agent collaboration notes (vibe-coding scratch docs, never commit)
 /.agent/
+.omc/
 
 # Build output
 /build/
