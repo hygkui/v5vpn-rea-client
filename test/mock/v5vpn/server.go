@@ -46,7 +46,17 @@ type Config struct {
 	ExpectedPwd  string
 	RequireCert  bool
 	Verbose      bool
+	// NCMode controls the portal RESOURCE_LIST fixture: "" (默认) 只下发
+	// TCP/UDP 资源；NCModeMixed 追加一个 NC (IPsec) 配置；NCModeOnly 只
+	// 下发 NC 配置（模拟「登录成功但 0 TCP/UDP 资源」账号）。
+	NCMode string
 }
+
+// NC portal-resource fixture modes. See Config.NCMode.
+const (
+	NCModeMixed = "mixed"
+	NCModeOnly  = "only"
+)
 
 // Session tracks an active client session.
 type Session struct {
@@ -773,7 +783,19 @@ func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request) {
   <USER name="%s" group="网络与数据安全研发中心" type="user" access_type="1" logout_policy="0" pwd_overtime="45"/>
   <SESSION sid_name="VSG_SESSIONID" id="%s" detect_interval="60" login-addr="127.0.0.1" login-time="2026-10-22 11:00:00"/>
   <GATEWAY version="5.3.3.32"/>
-  <RESOURCE_LIST>
+  <RESOURCE_LIST>%s
+  </RESOURCE_LIST>
+  <DNS_INFO>
+    <DOMAIN_HOST dnssrv="10.8.0.2;10.8.0.3" dnssrv_v6=""/>
+  </DNS_INFO>
+</INTERGRATION_INFO>`, html.EscapeString(username), sid, s.resourceListXML())
+}
+
+// resourceListXML renders the portal RESOURCE_LIST fixture. The default is
+// the three TCP/UDP proxy resources; NCMode appends or swaps in an NC (IPsec)
+// profile so NC-aware code paths can be exercised end to end.
+func (s *Server) resourceListXML() string {
+	const tcpudp = `
     <TCPUDP_RESOURCE name="内网OA协同办公" protocol="tcp" mapid="1" port="8080" status="1" istcp="1">
       <TCPUDP_IP addr="10.8.0.10-10.8.0.10"/>
     </TCPUDP_RESOURCE>
@@ -782,13 +804,38 @@ func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request) {
     </TCPUDP_RESOURCE>
     <TCPUDP_RESOURCE name="核心运维堡垒机 (SSH/RDP)" protocol="tcp" mapid="3" port="22" status="1" istcp="1">
       <TCPUDP_IP addr="10.8.0.30-10.8.0.30"/>
-    </TCPUDP_RESOURCE>
-  </RESOURCE_LIST>
-  <DNS_INFO>
-    <DOMAIN_HOST dnssrv="10.8.0.2;10.8.0.3" dnssrv_v6=""/>
-  </DNS_INFO>
-</INTERGRATION_INFO>`, html.EscapeString(username), sid)
+    </TCPUDP_RESOURCE>`
+
+	switch s.cfg.NCMode {
+	case NCModeMixed:
+		return tcpudp + ncResourceXML
+	case NCModeOnly:
+		return ncResourceXML
+	default:
+		return tcpudp
+	}
 }
+
+// ncResourceXML mirrors the shape real gateways send for <NC_RESOURCE>
+// (docs/ipsec.md §1): IKEv1 main mode + PSK, a session virtual IP and one
+// tunnel with secured routes. Addresses are TEST-NET (RFC 5737) so nothing
+// here can ever route anywhere real; the PSK is an obvious fixture value.
+const ncResourceXML = `
+    <NC_RESOURCE name="nc">
+      <IKE version="v1">
+        <SERVER ip="198.51.100.10" port="1194" id-type="ipv4" id="198.51.100.10"/>
+        <CLIENT port="1194" id-type="key_id" id="mock-nc-session"/>
+        <Exchange mode="main"/>
+        <PSK key="mock-psk-fixture"/>
+      </IKE>
+      <PRIVATE-IP ip="10.70.0.5" subnet="255.255.255.255"/>
+      <TUNNEL tunnel-name="Mock 办公网" mapid="198.51.100.10" status="1">
+        <EXTENSIONS>
+          <SECURED-ROUTE><ROUTE addr="198.51.100.0/24"/></SECURED-ROUTE>
+          <SECURED-ROUTES><ROUTE addr="203.0.113.0/24"/></SECURED-ROUTES>
+        </EXTENSIONS>
+      </TUNNEL>
+    </NC_RESOURCE>`
 
 func (s *Server) handleRuleXML(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[MockServer] -> GET /vpn/user/check/rule.xml")

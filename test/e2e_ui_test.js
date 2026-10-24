@@ -79,6 +79,23 @@ const SCENARIOS = {
     gateway: { name: 'V5VPN 测试网关(Mock)', username: 'admin', password: 'admin123' },
     expectedResources: ['内网OA协同办公', '研发代码仓库 (GitLab)'],
   },
+  // NC（IPsec 全路由）账号：mock 用 -nc only 下发 <NC_RESOURCE>、0 个
+  // TCP/UDP 资源。这一场景驱动 PR #13 的完整链路：service 拉起 IPsec
+  // 数据面（本机无 WSL 时状态机落到 unavailable）、/api/status 暴露
+  // ipsecResources/ipsecState、资源表进入 NC 分支、状态条渲染。这也是
+  // PSK 不泄漏到 API 的端到端守卫。
+  'v5vpn-nc': {
+    name: 'V5VPN NC/IPsec 资源',
+    mockPkg: 'github.com/hygkui/v5vpn-rea-client/test/mock/v5vpn',
+    entryPkg: 'github.com/hygkui/v5vpn-rea-client/cmd/mockserver',
+    mockArgs: (addr) => ['-addr', addr, '-mode', 'pwd-only', '-nc', 'only'],
+    protocol: 'v5vpn',
+    uiPath: '/v5vpn/',
+    statusPath: '/api/status',
+    gateway: { name: 'V5VPN NC 测试网关(Mock)', username: 'admin', password: 'admin123' },
+    expectedResources: [],
+    nc: true,
+  },
 };
 
 const SCENARIO = SCENARIOS[ARGS.scenario];
@@ -558,8 +575,10 @@ async function runScenario(page) {
 
   await recordStep(page, {
     id: 5,
-    title: '资源列表已从 mock 拉取并渲染',
-    desc: `等待表格里出现 mock 夹具下发的资源（${SCENARIO.expectedResources.join('、')}）。`,
+    title: SCENARIO.nc ? 'NC/IPsec 资源已拉取并渲染' : '资源列表已从 mock 拉取并渲染',
+    desc: SCENARIO.nc
+      ? '0 个 TCP/UDP 资源时，资源表进入 NC 分支并列出隧道与路由，状态条渲染数据面状态。'
+      : `等待表格里出现 mock 夹具下发的资源（${SCENARIO.expectedResources.join('、')}）。`,
     screenshotName: '05-resources.png',
     action: async () => {
       await page.waitForFunction(() => {
@@ -567,6 +586,10 @@ async function runScenario(page) {
         if (!rows.length) return false;
         return !rows[0].textContent.includes('正在从网关拉取');
       }, { timeout: 30000 });
+
+      if (SCENARIO.nc) {
+        return await assertNCView(page);
+      }
 
       const names = await page.$$eval('#resources-tbody tr', rows =>
         rows.map(r => (r.querySelector('strong') || r).textContent.trim()));
@@ -601,6 +624,65 @@ async function runScenario(page) {
       return `已断开；后端状态=${status.status || status.Status || '未知'}`;
     },
   });
+}
+
+// assertNCView 验证 NC（IPsec 全路由）账号在界面上的完整呈现。后端先把
+// /api/status 备齐：ipsecResources 带隧道与路由、ipsecState 离开 pending
+// 落到终态（无 WSL 的机器上是 unavailable，装了 WSL 的是 error/up——
+// 三者都算「状态机跑完了」，本套不绑死机器形态）。再核对 DOM：状态条
+// 可见、资源表进入 NC 分支。最后是安全不变量：整个 status 响应不得
+// 含 mock PSK——这是 PR #13「PSK 不进入任何 JSON 输出」的端到端守卫。
+async function assertNCView(page) {
+  const fetchStatus = () => page.evaluate(async (p) => {
+    const res = await fetch(p);
+    return res.json();
+  }, SCENARIO.statusPath);
+
+  const deadline = Date.now() + 30000;
+  let status = null;
+  while (Date.now() < deadline) {
+    status = await fetchStatus();
+    if (['unavailable', 'error', 'up'].includes(status.ipsecState)) break;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (!status || !['unavailable', 'error', 'up'].includes(status.ipsecState)) {
+    throw new Error(`30 秒内 ipsecState 未到达终态: ${JSON.stringify(status).slice(0, 300)}`);
+  }
+
+  const profiles = status.ipsecResources || [];
+  if (!profiles.length) {
+    throw new Error(`/api/status 未返回 ipsecResources: ${JSON.stringify(status).slice(0, 300)}`);
+  }
+  const tunnels = profiles.flatMap(p => p.tunnels || []);
+  if (!tunnels.some(t => (t.name || '').includes('Mock 办公网'))) {
+    throw new Error(`ipsecResources 缺少 mock 隧道: ${JSON.stringify(tunnels)}`);
+  }
+  const routesBlob = JSON.stringify(tunnels);
+  if (!routesBlob.includes('198.51.100.0/24') || !routesBlob.includes('203.0.113.0/24')) {
+    throw new Error(`隧道缺少 mock 路由: ${routesBlob}`);
+  }
+  const statusBlob = JSON.stringify(status);
+  if (statusBlob.includes('mock-psk-fixture')) {
+    throw new Error('PSK 泄漏进 /api/status 响应');
+  }
+
+  // 状态条：由头部每秒轮询刷新，等它出现并带上隧道信息。
+  await page.waitForFunction(() => {
+    const el = document.getElementById('ipsec-status');
+    return !!(el && el.offsetParent !== null && /IPsec/.test(el.textContent));
+  }, { timeout: 15000 });
+  const barText = (await page.$eval('#ipsec-status', el => el.textContent.trim()));
+
+  // 资源表 NC 分支：0 TCP/UDP 时的说明文案 + 已下发隧道列表。
+  const tableText = await page.$eval('#resources-tbody', tb => tb.textContent);
+  if (!tableText.includes('IPsec')) {
+    throw new Error(`资源表未进入 NC 分支: ${tableText.slice(0, 200)}`);
+  }
+  if (!tableText.includes('Mock 办公网') || !tableText.includes('198.51.100.0/24')) {
+    throw new Error(`资源表缺少隧道/路由信息: ${tableText.slice(0, 300)}`);
+  }
+
+  return `ipsecState=${status.ipsecState}；状态条: ${barText}；资源表: ${tableText.replace(/\s+/g, ' ').slice(0, 120)}…`;
 }
 
 // fill 清空并输入。复制来的输入框常有预填值（例如默认网关 IP），

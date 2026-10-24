@@ -1,6 +1,9 @@
 package protocol
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"fmt"
+)
 
 // VersionResponse represents /vpn/version.xml response
 type VersionResponse struct {
@@ -70,6 +73,112 @@ type GatewayInfo struct {
 
 type ResourceList struct {
 	TCPUDPResources []TCPUDPResource `xml:"TCPUDP_RESOURCE"`
+	// NCResources are Network Connect / IPsec profiles. The SSL CONNECT tunnel
+	// path cannot carry them; they are parsed so the UI can explain what the
+	// gateway granted instead of reporting a bare "0 resources".
+	NCResources []NCResource `xml:"NC_RESOURCE"`
+}
+
+// NCResource is one Network Connect profile: IKE parameters, the virtual IP
+// assigned to this session, and the tunnels (subnets) it protects.
+type NCResource struct {
+	Name      string     `xml:"name,attr" json:"name"`
+	IKE       IKEParams  `xml:"IKE" json:"ike"`
+	PrivateIP PrivateIP  `xml:"PRIVATE-IP" json:"privateIp"`
+	Tunnels   []NCTunnel `xml:"TUNNEL" json:"tunnels"`
+}
+
+type IKEParams struct {
+	Version  string      `xml:"version,attr" json:"version"`
+	Server   IKEEndpoint `xml:"SERVER" json:"server"`
+	Client   IKEEndpoint `xml:"CLIENT" json:"client"`
+	Exchange IKEExchange `xml:"Exchange" json:"exchange"`
+	// PSK is the pre-shared key from the portal response. It is deliberately
+	// never serialized: nothing outside the (future) IPsec engine needs it.
+	PSK IKEPSK `xml:"PSK" json:"-"`
+}
+
+type IKEExchange struct {
+	Mode string `xml:"mode,attr" json:"mode"`
+}
+
+type IKEPSK struct {
+	Key string `xml:"key,attr" json:"-"`
+}
+
+type IKEEndpoint struct {
+	IP     string `xml:"ip,attr" json:"ip,omitempty"`
+	Port   int    `xml:"port,attr" json:"port,omitempty"`
+	IDType string `xml:"id-type,attr" json:"idType,omitempty"`
+	ID     string `xml:"id,attr" json:"id,omitempty"`
+}
+
+type PrivateIP struct {
+	IP     string `xml:"ip,attr" json:"ip"`
+	Subnet string `xml:"subnet,attr" json:"subnet,omitempty"`
+}
+
+type NCTunnel struct {
+	Name   string    `xml:"tunnel-name,attr" json:"name"`
+	MapID  string    `xml:"mapid,attr" json:"mapId,omitempty"`
+	Status string    `xml:"status,attr" json:"status,omitempty"`
+	Routes []NCRoute `xml:"EXTENSIONS>SECURED-ROUTE>ROUTE" json:"routes,omitempty"`
+	Named  []NCRoute `xml:"EXTENSIONS>SECURED-ROUTES>ROUTE" json:"namedRoutes,omitempty"`
+}
+
+type NCRoute struct {
+	Addr    string `xml:"addr,attr" json:"addr"`
+	Exclude string `xml:"exclude,attr" json:"exclude,omitempty"`
+}
+
+// IPsecResource is the UI-facing summary of an NC profile. It carries no key
+// material and is safe to expose through the HTTP API.
+type IPsecResource struct {
+	Name      string        `json:"name"`
+	Server    string        `json:"server"`
+	PrivateIP string        `json:"privateIp"`
+	Tunnels   []IPsecTunnel `json:"tunnels"`
+}
+
+type IPsecTunnel struct {
+	Name   string   `json:"name"`
+	Routes []string `json:"routes"`
+}
+
+// SummarizeNCResources flattens NC profiles into the summary the connected
+// view shows when there are no TCP/UDP resources to proxy.
+func SummarizeNCResources(list []NCResource) []IPsecResource {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]IPsecResource, 0, len(list))
+	for _, nc := range list {
+		srv := nc.IKE.Server.IP
+		if nc.IKE.Server.Port > 0 {
+			srv = fmt.Sprintf("%s:%d", nc.IKE.Server.IP, nc.IKE.Server.Port)
+		}
+		summary := IPsecResource{
+			Name:      nc.Name,
+			Server:    srv,
+			PrivateIP: nc.PrivateIP.IP,
+		}
+		for _, tun := range nc.Tunnels {
+			routes := make([]string, 0, len(tun.Routes)+len(tun.Named))
+			for _, r := range tun.Routes {
+				if r.Addr != "" {
+					routes = append(routes, r.Addr)
+				}
+			}
+			for _, r := range tun.Named {
+				if r.Addr != "" {
+					routes = append(routes, r.Addr)
+				}
+			}
+			summary.Tunnels = append(summary.Tunnels, IPsecTunnel{Name: tun.Name, Routes: routes})
+		}
+		out = append(out, summary)
+	}
+	return out
 }
 
 type TCPUDPResource struct {

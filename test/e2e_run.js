@@ -34,6 +34,7 @@ const ARGS = parseArgs(process.argv);
 // 套件定义：子命令 + 单套摘要文件。顺序即执行顺序。
 const SUITES = [
   { key: 'v5vpn', title: 'V5VPN 主链路（登录 → 资源 → 断开）', cmd: ['node', 'e2e_ui_test.js', '--scenario=v5vpn'], summary: 'suite-ui-v5vpn.json' },
+  { key: 'v5vpn-nc', title: 'V5VPN NC/IPsec 资源（0 TCP/UDP → 状态条 + NC 资源表）', cmd: ['node', 'e2e_ui_test.js', '--scenario=v5vpn-nc'], summary: 'suite-ui-v5vpn-nc.json' },
   { key: 'multi', title: 'V5VPN 11 合 1 深度场景（2FA / 三因素 / 全链 / 改密 / 验证码 / 短信 / 令牌）', cmd: ['node', 'e2e_v5vpn_multi_test.js'], summary: 'suite-multi.json' },
   { key: 'atrust', title: 'aTrust 主链路（登录 → 资源 → 断开）', cmd: ['node', 'e2e_ui_test.js', '--scenario=atrust'], summary: 'suite-ui-atrust.json' },
 ];

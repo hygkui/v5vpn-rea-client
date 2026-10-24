@@ -20,7 +20,7 @@ test/
     atrust/     aTrust 零信任网关 mock 实现
     v5vpn/      V5VPN / 网御网关 mock 实现（package mockserver，可被测试 import）
   e2e_run.js              UI E2E 统一入口：顺序跑全部套件（子进程隔离），聚合 results/report.html
-  e2e_ui_test.js          主链路 UI E2E（v5vpn / atrust 两场景），自拉起沙盒
+  e2e_ui_test.js          主链路 UI E2E（v5vpn / v5vpn-nc / atrust 场景），自拉起沙盒
   e2e_v5vpn_multi_test.js V5VPN 11合1多重认证与异常流深度自动化测试（含2FA/三因素链/全链挑战/单口令/证书/改密/图形验证码/短信/动态令牌等），自拉起沙盒
   run.sh                  总入口：go 集成测试 + UI 端到端（统一入口，不会漏套件）
   results/                运行期产物（统一报告 report.html、各套件报告与摘要 suite-*.json、逐步截图、日志），已 gitignore
@@ -31,8 +31,9 @@ test/
 ```bash
 ./test/run.sh                 # go 集成测试 + 全部 UI E2E（聚合一份报告）
 ./test/run.sh go              # 只跑 Go（快，CI 用这个）
-./test/run.sh e2e             # 全部 UI E2E：V5VPN 主链路 + 11合1 深度 + aTrust 主链路
+./test/run.sh e2e             # 全部 UI E2E：V5VPN 主链路 + NC/IPsec 资源 + 11合1 深度 + aTrust 主链路
 ./test/run.sh ui v5vpn        # 只跑 v5vpn 主链路（单套调试）
+./test/run.sh ui v5vpn-nc     # 只跑 NC/IPsec 资源场景（mock 下发 <NC_RESOURCE>，0 TCP/UDP）
 ./test/run.sh ui multi        # 只跑 11合1 深度场景
 ./test/run.sh ui atrust       # 只跑 aTrust 主链路
 ```
