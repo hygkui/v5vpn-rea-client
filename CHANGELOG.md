@@ -1,5 +1,26 @@
 # 更新日志
 
+## 0.6.0
+
+新增 V5VPN 的 NC/IPsec（Network Connect）数据面支持：当网关下发 `<NC_RESOURCE>`
+而非常规端口资源时，通过 WSL2 内置 strongSwan 承载 IKEv1 + ESP 隧道，实现对内网
+受保护子网的透明 IP 级路由访问。
+
+本版 NC/IPsec 数据面编排与 WSL 方案由 **@Fujin0528** 贡献（[PR #13](https://github.com/hygkui/v5vpn-rea-client/pull/13)）。
+
+### NC/IPsec 数据面（WSL2 + strongSwan）
+
+- **strongSwan 编排（internal/ipsec）**：解析网关下发的 NC 资源，按会话动态渲染 `swanctl` IKEv1 主模式 + PSK 配置；使用网关指定端口协商，在 WSL2 内拉起隧道并配置虚拟 IP 与 SNAT。
+- **Windows 路由透明穿透**：以管理员身份运行客户端时，自动将受保护网段路由指向 WSL2 适配器，Windows 原生应用与浏览器可无缝访问内网目标；非管理员模式下隧道仅在 WSL 内部可用并在界面明确提示。
+- **一键配置脚本**：新增 `scripts/setup-ipsec-wsl.ps1`，自动化导入 WSL2 Ubuntu 发行版、安装 strongSwan 并开启内核转发。
+- **界面状态展示**：已连接视图新增 IPsec 状态条与受保护网段列表，隧道建立、运行与异常原因实时可见。
+
+### 数据面与生命周期稳定性修复
+
+- **WSL 路由网关精确解析**：修复 WSLIP 在 VirtualIP 添加到 `eth0` 后误取虚拟 IP 导致 Windows `route.exe` 添加失败的问题，精确提取 WSL 宿主通信地址。
+- **并发登出竞态防护**：为 `startIPsec` 引入可取消上下文与退出状态拦截，避免用户在协商中途断开时残留孤儿隧道与失效路由。
+- **重连会话彻底清理**：修复 `cleanupStaleSessionLocked` 未停止既有 IPsec 隧道的问题，避免 WSL `iptables` 遗留旧 SNAT 规则导致新会话流量被 XFRM 丢弃。
+
 ## 0.5.0
 
 新增网页类资源（端口区间，如堡垒机）经本地 CONNECT 代理访问并自动接管

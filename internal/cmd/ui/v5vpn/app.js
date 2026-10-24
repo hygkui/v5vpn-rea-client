@@ -6,6 +6,11 @@
   let isConnected = false;
   let logPollTimer = null;
   let selectedCertId = '';
+  // Last IPsec (NC) profiles from /api/status. They have no local proxy; the
+  // table shows them instead of a bare "no resources" line.
+  let lastIPsec = [];
+  let lastIPsecState = '';
+  let lastIPsecError = '';
   let certs = [];
 
   // ==================== 网关驱动的挑战状态 ====================
@@ -1599,7 +1604,7 @@
     if (info) {
       sessionIdVal.textContent = info.sessionId || '-';
       sessionIpVal.textContent = info.loginAddress || (currentGateway ? `${currentGateway.ip}:${currentGateway.port}` : '-');
-      renderResources(info.resources || []);
+      renderResources(info.resources || [], info.ipsecResources || []);
       // Certificate sessions have no password to change; hide the shortcut.
       if (connectedChangePwdBtn) {
         connectedChangePwdBtn.style.display = info.authType === 'certificate' ? 'none' : '';
@@ -1656,6 +1661,7 @@
       attempts++;
       try {
         const st = await api.getStatus();
+        updateIPsecStatus(st);
         if (st && st.status === 'Disconnected') {
           stopResourcePolling();
           showLoginView();
@@ -1672,7 +1678,7 @@
         stopResourcePolling();
         setResourceState(state, st.resourceError || '');
         if (state === 'ready') {
-          renderResources(st.resources || []);
+          renderResources(st.resources || [], st.ipsecResources || []);
         }
       } catch (_) {
         if (attempts > 40) stopResourcePolling();
@@ -1697,6 +1703,7 @@
       }
       try {
         const st = await api.getStatus();
+        updateIPsecStatus(st);
         if (st && st.status === 'Disconnected') {
           disconnectedCount++;
           if (disconnectedCount >= 2) {
@@ -1749,6 +1756,7 @@
     setConnectingState(false);
     closeChallengeModal();
     modalVerifycode = '';
+    lastIPsec = [];
     renderResources([]);
     setResourceState('ready', '');
     api.setWindowSize('login');
@@ -1764,11 +1772,67 @@
   });
 
   // Render Protected Resources Table
-  function renderResources(resources) {
+  // updateIPsecStatus renders the NC/IPsec state line. The tunnel is brought up
+  // by the backend (WSL + strongSwan); this only reports what it did.
+  function updateIPsecStatus(st) {
+    const el = document.getElementById('ipsec-status');
+    if (!el) return;
+    const ipsec = (st && st.ipsecResources) || [];
+    if (!ipsec.length) {
+      el.style.display = 'none';
+      return;
+    }
+    lastIPsecState = (st && st.ipsecState) || '';
+    lastIPsecError = (st && st.ipsecError) || '';
+    const tunnels = ipsec.flatMap(p => p.tunnels || []);
+    const names = tunnels.map(t => t.name).filter(Boolean).join('、') || 'NC';
+    let msg;
+    if (lastIPsecState === 'up') {
+      msg = `IPsec 隧道已建立：${names}。Windows 应用若无法访问内网，请以管理员权限运行客户端（自动添加路由），或手动添加路由。`;
+    } else if (lastIPsecState === 'starting') {
+      msg = `正在通过 WSL/strongSwan 建立 IPsec 隧道（${names}）...`;
+    } else if (lastIPsecState === 'error') {
+      msg = `IPsec 隧道建立失败：${lastIPsecError || '未知错误'}`;
+    } else if (lastIPsecState === 'unavailable') {
+      msg = `IPsec 数据面不可用：${lastIPsecError || 'WSL 发行版未安装'}`;
+    } else {
+      msg = `网关下发了 IPsec 隧道（${names}），等待建立。`;
+    }
+    el.textContent = msg;
+    el.className = 'ipsec-status ipsec-' + (lastIPsecState || 'pending');
+    el.style.display = 'block';
+  }
+
+  function renderResources(resources, ipsec) {
+    if (ipsec) lastIPsec = ipsec;
     resCount.textContent = resources.length;
     resourcesTbody.innerHTML = '';
 
     if (!resources || resources.length === 0) {
+      // An NC/IPsec profile produces no local proxy: the SSL tunnel path this
+      // client implements cannot carry it. Say so instead of "no resources".
+      const tunnels = (lastIPsec || []).flatMap(p => (p.tunnels || []).map(t => ({
+        name: t.name,
+        routes: (t.routes || []).join('、'),
+      })));
+      if (tunnels.length) {
+        const rows = tunnels.map(t =>
+          `<li><strong>${escapeHtml(t.name)}</strong>${t.routes ? '：' + escapeHtml(t.routes) : ''}</li>`
+        ).join('');
+        const stateText = lastIPsecState === 'up'
+          ? 'IPsec 隧道已建立，内网网段通过 WSL/strongSwan 承载（状态见上方）。本表只列出 TCP/UDP 代理资源。'
+          : '网关为该账号下发的是 <strong>IPsec 全路由（NC 资源）</strong>，没有 TCP/UDP 代理资源。';
+        resourcesTbody.innerHTML = `
+          <tr>
+            <td colspan="6" class="empty-state" style="text-align:left; line-height:1.8;">
+              ${stateText}<br>
+              已下发的隧道：
+              <ul style="margin:8px 0 0 18px;">${rows}</ul>
+            </td>
+          </tr>
+        `;
+        return;
+      }
       resourcesTbody.innerHTML = `
         <tr>
           <td colspan="6" class="empty-state">VPN 隧道中未发现受保护的 TCP 映射资源。</td>

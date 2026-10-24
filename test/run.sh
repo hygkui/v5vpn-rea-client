@@ -16,6 +16,7 @@
 #   ./test/run.sh e2e          # 全部 UI E2E（聚合一份报告）
 #   ./test/run.sh ui           # 同 e2e
 #   ./test/run.sh ui v5vpn     # 只跑 V5VPN 主链路（单套调试）
+#   ./test/run.sh ui v5vpn-nc  # 只跑 NC/IPsec 资源场景（单套调试）
 #   ./test/run.sh ui atrust    # 只跑 aTrust 主链路
 #   ./test/run.sh ui multi     # 只跑 11 合 1 深度场景
 #   ./test/run.sh all          # go + 全部 UI E2E
@@ -58,10 +59,11 @@ run_ui_single() {
   ensure_node_deps
   case "$scenario" in
     v5vpn)   node e2e_ui_test.js --scenario=v5vpn ;;
+    v5vpn-nc) node e2e_ui_test.js --scenario=v5vpn-nc ;;
     atrust)  node e2e_ui_test.js --scenario=atrust ;;
     multi|v5vpn-multi) node e2e_v5vpn_multi_test.js ;;
     *)
-      echo "未知场景: $scenario（可选: v5vpn | multi | atrust）" >&2
+      echo "未知场景: $scenario（可选: v5vpn | v5vpn-nc | multi | atrust）" >&2
       exit 2
       ;;
   esac
@@ -78,7 +80,7 @@ case "$WHAT" in
     ;;
   all|"")      run_go; run_e2e ;;
   *)
-    echo "用法: $0 [go|e2e|ui|all] [v5vpn|multi|atrust]" >&2
+    echo "用法: $0 [go|e2e|ui|all] [v5vpn|v5vpn-nc|multi|atrust]" >&2
     exit 2
     ;;
 esac

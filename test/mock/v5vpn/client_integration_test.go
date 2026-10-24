@@ -17,13 +17,15 @@ import (
 // startTestGateway starts a mock gateway on a random loopback port and returns
 // the server plus the host/port a protocol.Client needs.
 func startTestGateway(t *testing.T, mode Mode) (*Server, string, int) {
+	return startTestGatewayCfg(t, Config{Addr: "127.0.0.1:0", Mode: mode, Verbose: false})
+}
+
+// startTestGatewayCfg is startTestGateway with a full Config (e.g. an NC
+// resource fixture mode).
+func startTestGatewayCfg(t *testing.T, cfg Config) (*Server, string, int) {
 	t.Helper()
 
-	srv, err := New(Config{
-		Addr:    "127.0.0.1:0",
-		Mode:    mode,
-		Verbose: false,
-	})
+	srv, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}

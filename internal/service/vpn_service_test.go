@@ -247,6 +247,7 @@ func TestVPNService_LoginGateway2(t *testing.T) {
 
 	res, err := s.Login("demo-gateway", "<username>", "<password>", "", false, false)
 	if err != nil {
+		active.Store(false)
 		t.Skipf("Login not possible on placeholder credentials: %v", err)
 	}
 

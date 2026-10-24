@@ -10,6 +10,18 @@
 - 不用 `###` 小标题、表格、代码块、链接；
 - 详细内容留给 `CHANGELOG.md`，结尾可提示「详细说明见 GitHub Release 页面」。
 
+## 0.6.0
+
+新增 V5VPN NC/IPsec 数据面支持（WSL2 + strongSwan 编排）。
+
+- 支持网关下发的 NC 资源，通过 WSL2 strongSwan 建立 IKEv1 IPsec 隧道
+- 管理员身份运行时自动配置 Windows 路由，原生应用无感访问内网子网
+- 新增 scripts/setup-ipsec-wsl.ps1 一键初始化 WSL2 运行环境
+- 界面增加 IPsec 隧道运行状态与网段列表展示
+- 修复 Windows 路由网关解析、并发登出回滚及重连会话清理
+
+详细说明见 GitHub Release 页面。
+
 ## 0.5.0
 
 新增网页类资源（堡垒机等端口区间资源）本地代理访问，修复双因子账号改密。

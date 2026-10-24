@@ -1357,3 +1357,24 @@ button.github-link {
   color: var(--text-muted);
   word-break: break-word;
 }
+
+/* IPsec (NC) 隧道状态条：与 TCP/UDP 资源表并列展示 */
+.ipsec-status {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: rgba(56, 189, 248, 0.08);
+  color: var(--text-main, #e2e8f0);
+}
+.ipsec-status.ipsec-up {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+}
+.ipsec-status.ipsec-error,
+.ipsec-status.ipsec-unavailable {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+}

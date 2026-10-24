@@ -1,13 +1,13 @@
 # v5vpn-rea
 
-基于 **REA (Reverse Engineer Anything)** 逆向分析技术与 **MyGo** 跨平台桌面技术架构，重新实现的现代化 V5VPN 客户端；v0.4.0 起同时支持深信服 **aTrust 零信任**网关，双协议并存、界面独立切换。
+基于 **REA (Reverse Engineer Anything)** 分析研究方法与 **MyGo** 跨平台桌面技术架构，重新实现的现代化 V5VPN 客户端；v0.4.0 起同时支持深信服 **aTrust 零信任**网关，双协议并存、界面独立切换。
 
 > [!WARNING]
 > **免责声明**：本项目是独立的非官方技术研究项目，与网御星云（LeadSec）、
 > 启明星辰、深信服等任何厂商均无关联，也未获得其授权或背书。它通过观察协议
 > 行为重新实现客户端，仅供学习研究与互操作测试：请只在你自己拥有或被明确
 > 授权管理的设备、网关与账号上使用，并在使用前确认你所在司法辖区及雇主 /
-> 客户协议允许此类逆向与互操作研究。软件按 Apache 2.0 许可「按原样」提供，
+> 客户协议允许此类分析与互操作研究。软件按 Apache 2.0 许可「按原样」提供，
 > 不附任何担保，因使用或滥用本软件造成的任何后果由使用者自行承担。
 > 完整声明见 **[DISCLAIMER.md](DISCLAIMER.md)**。
 
@@ -15,8 +15,8 @@
 
 ## 1. 目标与技术参考
 
-- **逆向分析参考**：[morluto/rea](https://github.com/morluto/rea)
-- **待逆向目标软件**：`C:\Program Files (x86)\V5VPN` (网御星云 / LeadSec 系列 VPN)
+- **分析研究参考**：[morluto/rea](https://github.com/morluto/rea)
+- **待分析目标软件**：`C:\Program Files (x86)\V5VPN` (天清汉马 / 网御星云 / LeadSec 系列 VPN)
 - **重新实现技术架构**：[egoist/mygo](https://github.com/egoist/mygo) (纯 Go 桌面开发框架，系统原生 WebView2 + 强类型 IPC)
 
 ---
@@ -45,54 +45,15 @@
 
 ## 3. 分析过程
 
-通过对 `SecUI.exe`、`SecController.dll`、`SecLogin.dll`、`SecSSL.dll`、`VpnServ.exe` 进行符号表、反汇编及内存映射分析，完全破解了以下关键机制：
+通过对原厂客户端 `SecUI.exe`、`SecController.dll`、`SecLogin.dll`、`SecSSL.dll`、`VpnServ.exe` 的符号表、反汇编及内存映射观察分析，完整掌握了从本地凭证到隧道透传的关键机制。分析细节按主题沉淀在 docs，索引如下：
 
-### 3.1 本地凭证解密 (setting.xml)
-- **用户名**：标准 Base64 编码。
-- **密码**：DES-CBC，PKCS5/PKCS7 填充
-- 解密还原率 100%，支持自动导入或反向导出。
-
-### 3.2 协议交互流程 (Network Protocol)
-1. **版本探针**：`GET /vpn/version.xml` $\rightarrow$ `<VERSION major="2" minor="0"/>`。
-2. **口令认证**：`POST /vpn/user/auth/password`
-   - 编码方式：标准 Base64（`SecLogin.dll` 的 base64 例程对用户名与口令各编码一次），Raw 字符串拼接（避免 URL 转义 Base64 尾部字符）
-   - **关键参数 `encode`**：`encode=1` 指示网关按 Base64 解码。原厂 5.3.3.x 客户端在整条口令路径上没有任何 AES 加密调用（`SecLogin.dll` 未导入 `CryptEncrypt`，全部件内无 `encode=2` 字样）。
-   - 字段：`username={Base64(User)}&password={Base64(Pwd)}&encode=1&verifycode={code}`。
-   - 登录成功返回 Session Cookie：`VSG_SESSIONID`。
-   - **口令过期识别**：仅以网关结果码 `0x00000100`（十进制 256）为准，与原厂 `SecUI.exe` 的 `cmp eax, 0x100` 分支一致。`0x101`（用户名或口令不匹配）和 `0x8000001A`（密文解析失败）都按账号密码错误处理，即使响应文案提到「口令过期」也不会进入改密流程。若响应为 GBK 编码，客户端会自动转换为 UTF-8 再解析。
-2a. **短信认证（多因素，结果码 `0x8`）**：口令校验通过后，网关可再要求短信因子
-   （响应文案「多因素认证，短信认证」）。**手机号是网关侧为账号预设的属性**：
-   `send_smc` 没有请求体、`smc` 请求体只有验证码一个字段，客户端全程不填写、
-   不上送手机号；账号未绑定手机号时网关直接拒绝下发（文案「短信认证用户
-   没有设置手机号码」）。两步串行，沿用口令步骤下发的同一 `VSG_SESSIONID`：
-   - `GET /vpn/user/auth/send_smc`：请求网关向账号绑定手机下发验证码（对应原厂「发送短信」按钮，带重发倒计时）。
-   - `POST /vpn/user/auth/smc`：提交手机收到的验证码，字段 `smc={code}`（原样拼接，无 `encode` 参数）。
-   - 结果码 `0x10A`（短信码错误）不失效挑战，可原地重试；成功后按正常登录建立隧道。
-   - 短信因子也可接在证书因子之后（口令 → 证书 → 短信，或纯证书 → 短信），
-     证书随挑战会话保留到隧道建立。
-
-**网关驱动的认证状态机**：客户端不写死认证流程。每个因子提交后，网关的
-`RESULT` 结果码按位指出下一个待验因子（`0x1` 口令、`0x2` 证书、`0x4` 令牌、
-`0x8` 短信、`0x180` 改密，取最低置位位），客户端据此分发下一步——与原厂
-`SecUI.exe` 的因子掩码跳转一致。因此因子链（口令+证书、口令+短信、
-口令+证书+短信、证书+短信……）由网关动态编排，客户端按同一套挑战会话
-机制串行完成，新增一种可驱动的因子只需在分发点登记一步。界面上表现为
-**两个平级入口 + 挑战模态**：「🔑 口令登录」与「🪪 证书登录」是并排的
-独立入口（原厂 `Opt_Password` / `Opt_Cert`），登录框高度恒定；入口之后
-的每种挑战弹一个模态，多跳链是模态的连续替换。
-设计与不变量详见 [`docs/auth-flow.md`](docs/auth-flow.md)。
-3. **口令修改**：`POST /vpn/user/auth/pwdchange`
-   - 复用收到 `0x100` 登录响应的同一 HTTP 客户端，携带该响应下发的 `VSG_SESSIONID` Cookie。
-   - 字段：`old_pwd={OldPwd}&new_pwd={NewPwd}`，两个口令均按 UTF-8 明文提交，不携带 `encode` 参数（原厂客户端的拼装格式即 `old_pwd=%s&new_pwd=%s`）。
-   - 只有解析到明确的成功结果码 `0` 才算修改成功；HTTP 200 但缺少结果码或 XML 无法解析均按失败处理。
-   - 修改成功后，客户端自动使用新密码完成登录并建立隧道。
-4. **获取授权资源**：`GET /vpn/user/portal/intergration.xml?version=2.0`
-   - 获得 TCP/UDP 内网资源列表与端口、策略及 DNS。
-5. **隧道建立与数据透传**：
-   - 本地自动分配代理端口监听。
-   - 建立 SSL 连接并发送 `CONNECT {TargetIP}:{TargetPort} HTTP/1.1\r\nCookie: VSG_SESSIONID={SessionID}` 进行全双工透传。
-6. **保活心跳**：`GET /vpn/user/portal/intergration.xml?period={interval}&version=2.0`。
-7. **安全登出**：`GET /vpn/user/logout`。
+| 主题 | 结论速览 | 详细文档 |
+|:---|:---|:---|
+| 本地凭证 (setting.xml) | 用户名 Base64；口令 DES-CBC（PKCS5/7）；还原率 100% | [`docs/protocol.md`](docs/protocol.md) |
+| 协议交互流程 | 版本探针 → 认证 → 资源拉取 → 隧道透传 → 心跳 → 登出 | [`docs/protocol.md`](docs/protocol.md) |
+| 网关驱动的认证状态机 | `RESULT` 结果码按位分发因子，客户端不写死流程 | [`docs/auth-flow.md`](docs/auth-flow.md) |
+| 网页类资源（端口区间） | 本地 CONNECT 代理 + 系统 PAC | [`docs/web-proxy.md`](docs/web-proxy.md) |
+| IPsec（NC 资源） | WSL2 + strongSwan 数据面编排 | [`docs/ipsec.md`](docs/ipsec.md) |
 
 ---
 
@@ -121,7 +82,7 @@
 
 > 登录框固定为「网关 + 账号 + 口令」表单与两个平级入口按钮（口令登录 / 证书登录），高度恒定；
 > 所有网关挑战以模态窗口弹出，多跳链表现为模态的连续替换。因子链由网关
-> 动态编排（见 §3.2「网关驱动的认证状态机」与 `docs/auth-flow.md`）：
+> 动态编排（见 `docs/auth-flow.md`）：
 > 上表组合均已在 mock 网关全链对撞与 UI 端到端中覆盖，真实网关若给出其他
 > 因子顺序，客户端按结果码分发，无需改代码。
 
@@ -252,7 +213,7 @@ v5vpn-rea/
 │   └── service/          # 供 MyGo 前端调用的强类型 IPC 业务服务
 ├── configs/              # 本地运行配置（含保存凭证，已移出版本控制）
 ├── assets/               # 原创多分辨率盾牌图标与静态资源
-├── docs/                 # 逆向分析参考资料与发布检查清单
+├── docs/                 # 分析研究参考资料与发布检查清单
 ├── test/                 # 测试与 mock 网关（v5vpn / atrust），UI E2E 脚本
 ├── build.bat             # Windows 一键构建脚本
 ├── go.mod

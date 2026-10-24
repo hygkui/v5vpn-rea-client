@@ -21,6 +21,7 @@ func main() {
 	pwd := flag.String("pwd", "admin123", "Expected password")
 	requireCert := flag.Bool("require-cert", false, "Strictly require a client TLS certificate in /vpn/user/auth/cert")
 	verbose := flag.Bool("v", true, "Verbose request/response logging")
+	nc := flag.String("nc", "", "NC (IPsec) portal resource fixture: \"\" none, mixed (append to TCP/UDP list), only (replace list)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of v5vpn mockserver:\n")
@@ -47,6 +48,7 @@ func main() {
 		ExpectedPwd:  *pwd,
 		RequireCert:  *requireCert,
 		Verbose:      *verbose,
+		NCMode:       *nc,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize mock server: %v", err)
