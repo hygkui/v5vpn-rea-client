@@ -185,22 +185,48 @@ libipsec 证明 IKE/ESP 可脱离内核；最重要的是 §2.1 已实网锁定�
 |:---|:---|:---|
 | IKEv1 全栈 | 主模式 6 报文 + PSK 认证 + 快速模式 + DPD + 重协商 + NAT-T | **大头，数千行级**；Go 无生产级现成库，基本手写 |
 | ESP 数据面 | 序列号 + 抗重放窗口 + AES-CBC-192 + HMAC-SHA1-96 + UDP 4500 封装 | 性能无忧（AES-NI），烦在细节正确性 |
-| TUN 层 | wintun / utun / TUN 三套平台 API | wireguard-go 的 tun 包可复用，非主要风险 |
+| TUN 层 | wintun / utun / TUN 三套平台 API | 各平台百行级绑定，自写可行；wireguard-go 的 tun 包是 GPLv2，复用有传染性，视项目许可取舍 |
+| 特权 helper | Windows 服务 / launchd / systemd + IPC 权限校验 | **被低估的一半工程**：写坏即本地提权漏洞 |
 | 测试裁判 | mock 网关只有 REST 层，无 IKE/ESP 服务端 | 按「mock 是裁判」约定，动工前需先给 mock 实现 IKEv1 |
 | 长尾 | NAT keepalive、DPD 超时、SA 过期重协商、崩溃恢复 | 上线后的主要维护成本 |
 
+一个重要缓解：**本实现是单对端专用，不是通用 IPsec 客户端**——只需
+复刻网御网关认的那一组参数（§2.1 已全部锁定），无需实现 IKEv1 全集
+的提案组合与兼容分支，工作量比「通用」砍掉一大截。
+
+对应的两个长期代价：
+
+- **密码学正确性责任转移**：A 路线的 SA 协商与抗重放是 strongSwan
+  二十年 hardened 的实现；B 路线这些全在自己手里，一个状态机 bug
+  就是 CVE。Go 的加密原语安全，但协议组合的安全性自己负责。
+- **Windows 过渡期双数据面**：A 已实网落地，B 渐进上线的合理次序
+  是先补 Linux/macOS（A 够不到的平台），Windows 保留 WSL——
+  过渡期内两套数据面并存维护。
+
 两个必须先说清的边界：
 
-- **特权不会消失**：wintun 创建适配器需要管理员、utun 需要 root、
-  路由注入全平台要特权——B 摆脱的是 WSL2 依赖，不是提权需求
-  （A 路线的 `route.exe add` 同样要管理员，这点两路线打平）。
-  产品化做法是一次性安装 privileged helper（Tailscale 模式），
-  而非每次弹 UAC。
 - **「零内核驱动」表述需精化**：Windows 的 wintun 本质是驱动
   （`wintun.sys`，微软签名、WireGuard 维护的通用驱动，与厂商 TAP
   不冲突，驱动冲突痛点不会回来）；macOS utun / Linux TUN 是内核
   原生接口。`vendor-landscape.md` 的「不加载内核驱动」在 B 落地
   后应读作「不加载**厂商私有**驱动」。
+
+**特权不会消失**——它的来源不是 IPsec 协议（IKE 是普通 UDP、
+加解密是用户态运算，均零特权），而是三件碰系统的事：**建 TUN
+设备、改路由表、注入内核接口**。本项目单端口/区间资源零特权，
+正是因为走本地代理端口、三件事一件不碰。各平台承载的特权形态：
+
+| 平台 | 承载 | 特权点 | 用户感知 |
+|:---|:---|:---|:---|
+| Linux | 原生 strongSwan（A'） | XFRM 注入、路由 | 最优雅：strongSwan 即特权系统服务，装包 sudo 一次，运行时 app 经 VICI socket 免提权 |
+| Windows | WSL2（A）/ wintun（B） | 装 WSL、改路由 / 建适配器 | 现状为运行时管理员（`route.exe add`），WSL 内 root 用户无感 |
+| macOS | utun（B） | 建适配器、改路由 | 最重：无免提权形态，需一次性 launchd helper 或每次 sudo |
+
+产品化解法是 Tailscale 模式：安装时一次性装 privileged helper
+（Windows 服务 / launchd daemon / systemd unit），app 本身保持
+非特权，经 IPC 委托特权操作。另有一个零特权降级形态：NC 资源
+走本地 socks 代理 + 用户态 ESP（应用手动配代理，同单端口资源的
+哲学），代价是失去全网状透明路由。
 
 B 落地后的平台承载——即「全平台 NC 资源可达吗」的答案（数据面
 层面：是）：
