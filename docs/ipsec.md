@@ -57,7 +57,7 @@
 - **特权不可绕过**：无论是 Windows、macOS 还是 Linux，操作系统内核安全模型严格限制了修改路由表和操作底层网络接口的权限，**必须拥有管理员权限（Administrator / root / CAP_NET_ADMIN）**。
 
 ### 2.3 其他网络软件开启 TUN 模式引发的路由抢占与流量劫持
-用户在实际使用中经常反馈：“明明 VPN 显示已连接，但内网网页或服务打不开，把电脑上其他网络或代理软件的 TUN 模式关掉就立刻正常了”。这是三层透明 VPN 的必然物理规律：**同一台机器上的全局三层网络接管只能由一个工具独占，要访问内网资源就不能同时开启其他软件的 TUN 模式，二者天然互斥，无法兼得**。
+在实际运行环境中，当宿主机同时运行其他开启了「TUN 模式」的网络或代理软件时，常出现 VPN 控制面已显示连接成功，但所有内网服务均无法访问的现象。这是操作系统三层网络接管的底层互斥规律：**单一系统的三层全局路由只能由一个虚拟网卡有效接管，访问内网网段与开启其他全局 TUN 工具在路由层天然冲突，二者无法并存**。
 
 - **冲突机理**：
   - 其他网络或代理工具开启「TUN 模式」后，通常会以最高优先级向系统注入覆盖全网的默认兜底路由（如 `0.0.0.0/1` 和 `128.0.0.0/1`），甚至在底层网络驱动（如 Windows WFP）强制拦截所有外发数据包；
@@ -100,8 +100,8 @@ flowchart LR
     gw -->|"5. 解密并投递"| res
 ```
 
-### 3.2 为什么必须做 iptables SNAT？（关键机制说明）
-很多人疑惑：流量既然已经通过 Windows 路由转发到了 WSL 内部，为什么不能直接发出去，必须加一条 `iptables SNAT` 规则？
+### 3.2 转发核心：iptables SNAT 的技术必要性
+流量经 Windows 路由表引导进入 WSL 内部后，不能直接转发至外网，必须经过 SNAT 地址改写，根本原因在于网关的安全策略选择器机制：
 
 - **根本原因**：网关在 IKE 快速模式协商时下发的 Child SA 安全策略选择器（Traffic Selector）是：
   $$\text{Local (VIP)/32} \iff \text{Remote 0.0.0.0/0}$$
@@ -163,27 +163,25 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
   - 优点：Linux 上无需虚拟机，性能优异，开发成本极低（数人天即可接入）；
   - 缺点：强依赖宿主机系统包管理器安装 strongSwan（非单二进制自包含），且操作 XFRM 和路由仍需宿主机 `root` / `CAP_NET_ADMIN` 特权。
 
-### 为什么 strongSwan 自身无法实现桌面三平台统一？
-很多工程师会问：“既然 Linux 和 Windows 都能借 strongSwan 跑通，macOS 为什么不能也跑 strongSwan，从而实现统一？”
-
-**答案是：macOS 走不通，strongSwan 自身无法在桌面三平台实现统一。**
+### 4.2 strongSwan 无法作为三平台统一方案的技术论证（macOS 路线彻底否定）
+将 strongSwan 作为跨平台通用后端的路线在 macOS 上属于技术死胡同，已被架构层面彻底否定：
 
 1. **协议断层硬伤**：macOS 官方在系统级网络框架 `NetworkExtension` 中**仅支持现代 IKEv2**，早已废弃老旧的 IKEv1 主模式。strongSwan 官方发布的 macOS 客户端是基于 NetworkExtension 开发的，连上该网关直接报协议不支持。
 2. **内核后端缺失与移植代价**：
    - Linux 依靠内核 XFRM，FreeBSD 依靠 `PF_KEY`；macOS 既没有 XFRM 也不开放 raw PF_KEY；
-   - 若要在 macOS 上运行传统 strongSwan 守护进程，必须使用其 `kernel-libipsec` 插件（一个用户态 ESP 加解密实现），并通过代码将其桥接到 macOS 原生的 `/dev/utun` 网卡；
+   - 若要在 macOS 上运行传统 strongSwan 守护进程，必须使用其 `kernel-libipsec` 插件（一个用户态 ESP 加解密实现），并通过代码将其桥接到 macOS 原生的 utun 接口；
    - **代价严重倒挂**：这一套工作量等同于自行编写用户态 TUN 驱动，而且还要额外背负 strongSwan 庞大的 C 语言依赖、跨平台交叉编译与数十兆动态库的分发包袱，得不偿失。
 
 ### 方案 B：纯 Go 用户态自实现 IPsec（终极演进形态）
-- **解决思路**：参考通用纯用户态 VPN 架构（如 WireGuard-go 等），由 Go 客户端在用户态全自研实现 IKEv1 主模式状态机 + ESP 加解密（UDP 4500 封装），并借助成熟的通用虚拟网卡驱动（Windows 下的 `wintun`、macOS 原生的 `/dev/utun`、Linux 原生的 `/dev/net/tun`）完成三层数据包收发。
+- **解决思路**：参考通用纯用户态 VPN 架构（如 WireGuard-go 等），由 Go 客户端在用户态全自研实现 IKEv1 主模式状态机 + ESP 加解密（UDP 4500 封装），并借助成熟的通用虚拟网卡驱动（Windows 下的 `wintun`、macOS 原生的 utun 接口、Linux 原生的 `/dev/net/tun`）完成三层数据包收发。
 
-#### 1) 特权边界辨析：为什么特权无法消除？
-有人误以为：“用纯 Go 用户态自实现 IPsec 后，是不是就不需要系统管理员权限了？”
+#### 1) 特权边界辨析：B 路线摆脱的是外部依赖，而非系统特权
+纯 Go 用户态实现无法免除系统管理员权限，特权是三层网络接管的操作系统底层红线：
 
 **答案是：依然必须特权。B 路线摆脱的是 WSL2 虚拟机的笨重依赖，而不是提权需求。**
 
 特权的来源不是 IPsec 协议本身（IKE 是普通 UDP 报文通信，ESP 是纯 CPU 内存计算，零特权），而是**操作系统对三层网络接管的安全底线**：
-1. **创建/打开 TUN 网卡**：Windows 打开 Wintun 必须管理员权限，macOS 打开 `/dev/utun` 和 Linux 打开 `/dev/net/tun` 必须 `root` / `CAP_NET_ADMIN`；
+1. **创建/打开 TUN 网卡**：Windows 打开 Wintun 必须管理员权限，macOS 创建 utun 接口（PF_SYSTEM 控制套接字）和 Linux 打开 `/dev/net/tun` 必须 `root` / `CAP_NET_ADMIN`；
 2. **修改系统路由表**：向操作系统核心路由表中添加 `198.51.100.0/24` 的指向条目，全平台都必须管理员权限。
 
 #### 2) 产品化解法：Privileged Helper 架构
@@ -218,16 +216,18 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 
 ### 5.1 全方案横向对比表
 
-| 方案 | 跨平台覆盖度 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核安全影响 | 其他 TUN 软件冲突时的表现与要求 | 综合定位与评估 |
+| 方案 | 跨平台覆盖度 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核安全影响 | 其他 TUN 软件冲突表现 | 定性评估与架构结论 |
 |:---|:---|:---|:---|:---|:---|:---|
-| **方案 A：WSL2 + strongSwan**<br/>*(当前实网落地方案)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu 镜像、strongSwan | 运行时需系统管理员权限（注入 Windows 路由） | 宿主机零专有驱动；流量经 Hyper-V 进入 WSL 内核 XFRM | 路由若被其他 TUN 软件覆盖，内网彻底失联；**必须提示关闭其他 TUN** | **当前最优落地**：复用成熟工业级协议栈，稳定可用；缺点是环境笨重、需重启 |
-| **方案 A'：宿主机 strongSwan**<br/>*(单平台快速扩展)* | 仅 Linux | 依赖 Linux 发行版包管理器安装 strongSwan 软件包 | 需系统 `root` 或 `CAP_NET_ADMIN` | 宿主机零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | 与系统分流策略相关；可借助 Linux 策略路由（ip rule）隔离 | **Linux 最佳低成本捷径**：免虚拟机，编排同构，开发成本低，但无法实现单二进制分发 |
-| **方案 B：纯 Go 用户态 IPsec**<br/>*(长期演进目标)* | **Windows / macOS / Linux 三平台统一** | **零外部依赖**<br/>（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 引入通用轻量 `wintun.sys`（微软签名）；macOS/Linux 使用原生系统 TUN | 同样受三层路由抢占影响；需在客户端内置强提醒关闭其他 TUN | **终极架构形态**：真正跨平台自包含、无残留、免外部依赖；缺点是开发量数人月级，需承担密码学维护责任 |
-| **方案 C：原厂 DLL 注入**<br/>*(本地过渡测试)* | 仅 Windows | 强依赖已安装的原厂客户端文件及运行环境 | 依原厂要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`），驱动冲突依然存在 | 与原厂客户端冲突表现一致 | 仅作内部对照调试，不可分发 |
+| **方案 A：WSL2 + strongSwan**<br/>*(当前落地)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu 镜像、strongSwan 运行时 | 运行时需系统管理员权限（注入 Windows 路由） | 宿主机零专有驱动；流量经 Hyper-V 跨网络进入 WSL 内核 XFRM | 路由若被其他 TUN 覆盖，内网失联；**必须关闭其他 TUN** | **【当下现状 / Windows 过渡可用】**<br/>复用成熟工业级协议栈，现阶段在 Windows 上最稳妥可用；缺点是依赖重、需重启，非跨平台终极形态 |
+| **方案 A'：宿主机 strongSwan**<br/>*(单平台扩展)* | 仅 Linux | 依赖系统包管理器安装 strongSwan 软件包 | 需系统 `root` 或 `CAP_NET_ADMIN` | 宿主机零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | 依赖路由优先级调度；建议关闭其他全局 TUN | **【阶段可选 / 单平台低成本延伸】**<br/>仅适合信创/Linux 桌面快速补齐三层能力，开发成本极低；但无法单二进制分发，且无法解决 macOS |
+| **方案 B：纯 Go 用户态 IPsec**<br/>*(终极目标)* | **Windows / macOS / Linux 三平台统一** | **零外部依赖**<br/>（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 引入通用轻量 `wintun.sys`（微软签名）；macOS/Linux 使用原生系统 TUN | 同样受三层路由抢占影响；客户端内置强提醒排查机制 | **【推荐 / 跨平台终极彻底解法】**<br/>真正达成三平台单二进制自包含分发，彻底摆脱 WSL2 与系统包依赖；虽需承担自研状态机维护责任，但是唯一正解 |
+| **方案 C：原厂 DLL 注入**<br/>*(逆向验证)* | 仅 Windows | 强依赖本机已安装的原厂客户端文件及环境 | 依原厂要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`），驱动冲突依然存在 | 与原厂客户端表现一致 | **【完全不可行 / 坚决废弃】**<br/>强行绑定原厂闭源环境与专有驱动，违背本项目「杜绝专有驱动冲突」的核心立项宗旨，且存在版权与分发风险 |
+| **方案 D：macOS 运行 strongSwan**<br/>*(跨平台尝试)* | 仅 macOS | 需移植 strongSwan charon + kernel-libipsec 动态库 | 创建 utun 接口需 `root` 权限 | 依赖 utun 接口 | 同样存在多 TUN 抢占 | **【完全不可行 / 架构死胡同】**<br/>macOS 系统框架仅支持 IKEv2，强行移植用户态 charon 成本严重倒挂，等同于手写 TUN 却额外背负庞大 C 依赖 |
 
 ### 5.2 决策结论
 
-1. **现状保证可用性**：Windows 端维持当前 **方案 A（WSL2 + strongSwan）** 不动，实网已验证其可靠性；对于未安装 WSL 的用户，保持非 NC 资源完全正常运行，NC 资源优雅降级并给出安装提示。
-2. **其他 TUN 软件冲突强提醒**：明确「要访问内网就不能同时开启其他 TUN 软件」的互斥原则。在客户端 UI 增加明显的排查指引与强提醒，内网连不上时明确提示用户关闭其他网络工具的 TUN 模式。
-3. **Linux 优先采纳 A' 路线**：若需快速支持 Linux 桌面与国产信创系统，优先实现原生 Linux strongSwan 编排（A'），以极小代价补齐 Linux NC 能力。
-4. **长期演进锁定 B 路线**：纯 Go 用户态 IPsec（B）是实现 Windows / macOS / Linux 三平台统一、单二进制自包含分发的唯一路径。演进应遵循 **「mock 裁判先行 $\rightarrow$ 自研 IKEv1/ESP $\rightarrow$ Privileged Helper 落地 $\rightarrow$ 多 TUN 冲突防御」** 的稳健路径分步实施。
+1. **【当下现状】维持方案 A 保障 Windows 可用性**：Windows 端继续沿用 WSL2 + strongSwan 承载，实网已验证其稳定性；未安装 WSL 时优雅降级为 `unavailable` 并给出配置脚本提示，绝不阻断非 NC 资源的使用。
+2. **【彻底解决】演进主线锁定方案 B（纯 Go 用户态 IPsec）**：纯 Go 用户态实现是摆脱 WSL2 笨重依赖、实现 Windows/macOS/Linux 三平台单一自包含二进制分发的唯一正确路径。实施次序锁定为 **「mock 裁判先行 $\rightarrow$ 自研 IKEv1/ESP 核心 $\rightarrow$ Privileged Helper 落地 $\rightarrow$ 冲突诊断强提醒」**。
+3. **【阶段可选】Linux 信创场景可权衡采纳方案 A'**：若短期内需要低成本覆盖统信 UOS / 麒麟等国产 Linux 桌面，可优先以数人天成本实现宿主 strongSwan 编排（A'）作为阶段性过渡。
+4. **【彻底否定】坚决废弃方案 C 与 macOS strongSwan 方案**：原厂 DLL 注入（方案 C）严重违背零驱动冲突原则；macOS strongSwan 路线因系统协议断层和架构倒挂，直接在技术选型中否决。
+5. **【操作底线】多 TUN 互斥与用户强提醒**：确立「要访问内网就不能同时开启其他 TUN 软件」的排他原则。在客户端连接诊断中内置活动网卡探测与内网连通性检测，排查到异常时明确向用户提示退出其他 TUN 软件。
