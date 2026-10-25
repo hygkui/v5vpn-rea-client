@@ -18,6 +18,61 @@ mock 网关（`test/mock/v5vpn`）为裁判（见 `test/README.md`）。
 
 ## 2. 协议交互流程 (Network Protocol)
 
+先看全景（各步字段细节在图后逐条展开；认证多跳的状态机视角见
+[`auth-flow.md`](auth-flow.md)）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as 客户端 (protocol.Client)
+    participant G as V5VPN 网关
+    participant U as 用户
+
+    C->>G: ① GET /vpn/version.xml （版本探针）
+    G-->>C: <VERSION major="2" minor="0"/>
+
+    C->>G: ② POST /vpn/user/auth/password<br/>username=Base64(用户名) password=Base64(口令) encode=1
+    alt 结果码 0x100 —— 口令过期
+        G-->>C: RESULT 0x100 + VSG_SESSIONID
+        U->>C: 在改密模态输入旧/新口令
+        C->>G: ③ POST /vpn/user/auth/pwdchange<br/>old_pwd / new_pwd（UTF-8 明文）
+        G-->>C: RESULT 0（成功才作数）
+        Note over C,G: 修改成功 → 自动用新口令重走 ② 建立隧道
+    else 结果码 0x8 —— 还要短信因子
+        G-->>C: RESULT 0x8 + VSG_SESSIONID（沿用口令步会话）
+        U->>C: 点击「发送短信」
+        C->>G: ②a GET /vpn/user/auth/send_smc （无请求体）
+        G-->>C: 向账号绑定手机下发验证码
+        U->>C: 输入收到的验证码
+        C->>G: POST /vpn/user/auth/smc smc={code}
+        alt 验证码错误 (0x10A)
+            G-->>C: RESULT 0x10A
+            Note over C,U: 挑战不失效，原地重试
+        end
+        G-->>C: RESULT 0
+    else 一步通过（纯口令）
+        G-->>C: RESULT 0, Set-Cookie VSG_SESSIONID
+    end
+
+    C->>G: ④ GET /vpn/user/portal/intergration.xml?version=2.0
+    G-->>C: TCP/UDP 资源 + 策略 + DNS + (可选) NC_RESOURCE
+
+    Note over C: 本地起端口映射 / 回环 CONNECT 代理
+    C->>G: ⑤ CONNECT {TargetIP}:{TargetPort} HTTP/1.1<br/>Cookie: VSG_SESSIONID={SessionID}
+    G-->>C: 200 —— 全双工透传
+
+    loop 心跳（period 由 intergration.xml 下发）
+        C->>G: ⑥ GET intergration.xml?period={interval}&version=2.0
+    end
+
+    C->>G: ⑦ GET /vpn/user/logout （安全登出）
+```
+
+结果码驱动而非流程写死：每提交一个因子，`RESULT` 按位掩码指出下一个
+待验因子（`0x1` 口令 / `0x2` 证书 / `0x4` 令牌 / `0x8` 短信 / `0x180`
+改密，取最低置位位），客户端循环到 `0` 为止——跳数由网关决定，事先
+不可知。
+
 1. **版本探针**：`GET /vpn/version.xml` $\rightarrow$ `<VERSION major="2" minor="0"/>`。
 2. **口令认证**：`POST /vpn/user/auth/password`
    - 编码方式：标准 Base64（`SecLogin.dll` 的 base64 例程对用户名与口令各编码一次），Raw 字符串拼接（避免 URL 转义 Base64 尾部字符）

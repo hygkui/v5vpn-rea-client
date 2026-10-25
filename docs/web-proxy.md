@@ -35,6 +35,39 @@ V5VPN 网关把堡垒机这类「整台主机」资源下发为：
 > 经它访问目标地址，每条连接都以 `Cookie: MapID=<资源 mapid>;
 > VSG_SESSIONID=<会话>` 与网关建隧道。
 
+浏览器访问一条区间资源的完整路径：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as 系统浏览器
+    participant BR as UI Bridge（主端口）
+    participant P as 本地 CONNECT 代理 WebProxy<br/>(127.0.0.1:port, 每资源一个)
+    participant G as V5VPN 网关
+    participant T as 内网资源 (堡垒机 10.10.20.15)
+
+    B->>BR: GET /proxy.pac（AutoConfigURL 指向主端口）
+    BR-->>B: PAC 脚本（FindProxyForURL 由浏览器执行：<br/>命中资源/补充地址 → 本地代理；其余 DIRECT）
+    B->>P: CONNECT 10.10.20.15:443
+
+    alt 目标不在 allowedHosts 白名单
+        P-->>B: 403（防本机其它进程借道会话凭据）
+    else 命中白名单
+        P->>G: SSL 连接 + CONNECT 10.10.20.15:443 HTTP/1.1<br/>Cookie: MapID=M_100、VSG_SESSIONID=…
+        alt 网关未授权该 MapID 的目标
+            G-->>P: 非 200
+            P-->>B: 502（表现为资源打不开）
+        else 网关放行
+            G-->>P: 200
+            P-->>B: 隧道建立
+            loop 隧道存续期（双向拷贝，任一侧断开即收尾）
+                B->>T: 请求
+                T-->>B: 响应
+            end
+        end
+    end
+```
+
 反面案例（历史上出现过，勿再犯）：
 - 系统全局代理（ProxyServer）：把外网流量一并送进 VPN，必须实现直连回退；
 - 虚拟网卡（TAP/WinTUN）：需要驱动签名与路由接管，影响面大、回滚困难。
@@ -69,6 +102,21 @@ V5VPN 网关把堡垒机这类「整台主机」资源下发为：
 
 非 Windows 平台：系统 PAC 不实现（`systemproxy_other.go` 返回错误），
 本地 CONNECT 代理本身仍可用（可用 `--proxy-server` 参数启动浏览器）。
+
+系统 PAC 的接管与还原是一个以**备份文件存在性**为凭据的状态机：
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "未接管（无备份文件）" as idle
+    state "接管中（system-proxy-backup.json 存在）" as active
+
+    [*] --> idle
+    idle --> active: 登录且有网页资源（Windows + PAC 开）<br/>备份原设置(0600) → 写 AutoConfigURL → InternetSetOptionW
+    active --> active: 资源刷新 / 再次应用<br/>只更新 URL，绝不覆盖原始备份
+    active --> idle: 登出 / 断开 / 关闭 PAC 开关<br/>还原备份 + 删除文件 + 通知浏览器
+    active --> idle: 进程被强杀来不及还原<br/>→ 下次启动 recoverSystemProxy 收拾
+```
 
 ## 4. PAC 生成的安全边界
 

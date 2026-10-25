@@ -50,6 +50,63 @@
 
 数据面不在 Go 里重写 IKE，而是把 strongSwan 跑在 WSL2 里，Go 侧负责编排：
 
+```mermaid
+flowchart LR
+    app["Windows 应用<br/>(浏览器 / 客户端)"]
+    winroute["Windows 路由表<br/>SECURED-ROUTE → 指向 WSL 地址<br/>(需管理员权限)"]
+    subgraph wsl["WSL2 发行版 v5vpn"]
+        snat["iptables SNAT<br/>目标地址 → 会话虚拟 IP"]
+        charon["strongSwan / charon<br/>swanctl 配置（按会话重建）<br/>本地监听 UDP 1194"]
+        xfrm["XFRM / ESP<br/>aes192-sha1"]
+    end
+    gw["V5VPN 网关<br/>IKEv1 主模式 + PSK"]
+    res["内网资源<br/>(SECURED-ROUTE 网段)"]
+
+    app -->|"访问 203.0.113.10"| winroute
+    winroute --> snat
+    snat --> xfrm
+    xfrm -->|"ESP，NAT-T 浮动 UDP 4500"| gw
+    charon -.->|"控制面：IKEv1 主模式<br/>本地 1194 → 远端 1194<br/>身份 keyid:&lt;SESSION id&gt;"| gw
+    gw --> res
+```
+
+实线是用户数据的路径（Windows 路由 → WSL SNAT → ESP），虚线是 IKE
+控制面。Go 侧不在这张图里——`internal/ipsec` 的工作是**编排**：生成
+swanctl 配置、拉起连接、加路由，见下面的时序：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SV as VPNService
+    participant IM as internal/ipsec (Manager)
+    participant WS as WSL2 / strongSwan
+    participant GW as 网关
+
+    Note over SV: loadResources 发现 NC_RESOURCE
+    SV->>SV: go startIPsec(ncs)<br/>FromNC(ncs) 生成数据面配置<br/>(PSK / 虚拟 IP / session id 每次登录都变)
+    SV->>SV: ipsecState = starting
+    IM->>WS: 检查 WSL 发行版可用性
+    alt WSL 不可用
+        SV->>SV: ipsecState = unavailable<br/>（界面提示跑 setup-ipsec-wsl.ps1）
+    else WSL 可用
+        IM->>WS: 同一脚本：写 /etc/swanctl/conf.d/v5vpn.conf、<br/>加虚拟 IP 与 SNAT、确保 charon 监听 1194
+        IM->>WS: swanctl --load-all && --initiate
+        WS->>GW: IKEv1 主模式（本地 1194 → 远端 1194，后浮动 4500）
+        GW-->>WS: IKE_SA ESTABLISHED
+        Note over WS,GW: 快速模式：Child SA 选择器<br/>VIP/32 === 0.0.0.0/0
+        GW-->>WS: CHILD_SA INSTALLED
+        IM-->>SV: Start 成功，返回 WSL 地址<br/>（拿不到地址则跳过 Windows 路由）
+        SV->>IM: AddRoutes（SECURED-ROUTE → WSL 地址）
+        alt 路由添加成功（管理员）
+            Note over SV: Windows 应用直达内网
+        else 返回 ErrNotElevated（非管理员）
+            Note over SV: 隧道照常建立，仅 WSL 内可达<br/>界面提示手动加路由
+        end
+        SV->>SV: ipsecState = up
+    end
+    Note over SV: 任一步失败 → ipsecState = error + ipsecError<br/>/api/status 暴露给界面；登出 → 清空并拆隧道
+```
+
 - `internal/ipsec`：从 NC 资源生成 swanctl 配置，启动/停止连接，管理路由与 SNAT。
 - `VPNService`：资源拉取成功后自动启动隧道，`/api/status` 暴露
   `ipsecState` / `ipsecError`，界面显示状态条。

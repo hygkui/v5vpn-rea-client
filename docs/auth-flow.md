@@ -22,6 +22,31 @@
 
 > 每提交一个因子，读网关结果码，问下一步要什么；不枚举流程，不写死顺序。
 
+```mermaid
+flowchart TD
+    form["登录框（固定高度）<br/>两个平级入口"] -->|"🔑 口令登录"| pwdf["POST /api/login"]
+    form -->|"🪪 证书登录（standalone）"| certf["POST /api/login-cert"]
+    pwdf --> submit
+    certf --> submit
+
+    submit["提交一个因子<br/>复用挑战会话的同一 HTTP client"] --> gw{"网关 RESULT code"}
+    gw -->|"0"| connected(["认证完成 enterConnected<br/>挑战会话作废"])
+    gw -->|"按最低置位位解码<br/>NextAuthStep(code)"| dispatch["dispatchAuthError(err)<br/>UI 侧唯一分发点"]
+    dispatch --> modal["openChallengeModal<br/>按类型重建模态 body"]
+    modal -->|"可重试拒绝（如 0x10A 短信错码）<br/>错误留在 #modal-alert"| modal
+    modal -->|"提交下一因子"| submit
+
+    dispatch -.->|"0x1 口令"| t1["口令模态"]
+    dispatch -.->|"0x2 证书"| t2["证书模态（链中 /api/cert-factor）"]
+    dispatch -.->|"0x4 令牌"| t4["令牌模态 /api/token-login"]
+    dispatch -.->|"0x8 短信"| t8["短信模态 /api/sms-send + /api/sms-login"]
+    dispatch -.->|"0x180 改密"| t18["改密模态 /api/change-password"]
+```
+
+要点读图：**多跳链 = 模态的连续替换**（虚线五种挑战共用一个模态壳，
+来一个换一个，登录框永远不动）；挑战会话（`VSG_SESSIONID`）留在
+后端 `authChallenge` 槽位，前端只传 `gwId` + 因子值。
+
 反面案例（历史上出现过，勿再犯）：
 - 「口令 + 证书」页签把两步串行写死在按钮里 → 网关若在证书后追加短信，
   流程就断了；
@@ -45,6 +70,57 @@
 - **界面层**：`dispatchAuthError` 是 UI 侧唯一的结果码分发点。四种挑战
   （图形验证码 / 客户端证书 / 短信 / 改密）共用一个模态壳，`openChallengeModal`
   按类型重建 body；**多跳链表现为模态的连续替换**，不是面板堆叠。
+
+三层的协作以「口令 → 证书 → 短信」三跳链（E2E 场景 9）为例：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant FE as 前端 app.js（界面层）
+    participant BE as 本地后端（服务层 /api/* → VPNService）
+    participant CL as protocol.Client（协议层）
+    participant GW as 网关
+
+    U->>FE: 输入口令，点击「口令登录」
+    FE->>BE: POST /api/login
+    BE->>CL: AuthOnly(user, pwd)
+    CL->>GW: POST /vpn/user/auth/password
+    GW-->>CL: RESULT 0x2（还需证书）+ VSG_SESSIONID
+    CL-->>BE: 挑战（下一步 = 证书）
+    BE->>BE: keepChallengeLocked → authChallenge{next: cert}
+    BE-->>FE: {challenge: cert_challenge}
+    FE->>FE: 弹证书模态（openChallengeModal 重建 body）
+    Note over U,GW: 挑战会话留在后端；前端只见 gwId + 因子值
+
+    U->>FE: 选择证书提交
+    FE->>BE: POST /api/cert-factor
+    BE->>CL: SubmitCertFactor（复用挑战的 client）
+    CL->>GW: POST /vpn/user/auth/cert（同一 VSG_SESSIONID）
+    GW-->>CL: RESULT 0x8（还需短信）
+    CL-->>BE: 挑战（下一步 = 短信）
+    BE->>BE: authChallenge.next → sms
+    BE-->>FE: {challenge: sms_challenge}
+    FE->>FE: 模态连续替换 → 短信模态
+
+    U->>FE: 点击「发送短信」
+    FE->>BE: POST /api/sms-send
+    BE->>CL: SendSMC()
+    CL->>GW: GET /vpn/user/auth/send_smc
+    GW-->>U: 验证码下发到账号绑定手机（网关侧预设）
+
+    U->>FE: 输入验证码
+    FE->>BE: POST /api/sms-login
+    BE->>CL: AuthSMC(code)
+    CL->>GW: POST /vpn/user/auth/smc
+    GW-->>CL: RESULT 0
+    CL-->>BE: 认证通过
+    BE-->>FE: {status: Connected, resourceState: loading}
+    Note over BE: authChallenge 作废（登录成功即作废）<br/>enterConnected → 后台拉资源
+```
+
+E2E 场景 11（full-chain）是同一条回路的四跳版本：验证码 → 证书 →
+短信 → 令牌，模态逐个替换、会话始终是同一个。
 
 ## 3. 界面形态：两个平级入口 + 挑战模态
 
