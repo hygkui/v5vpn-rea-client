@@ -213,10 +213,19 @@ B 落地后的平台承载——即「全平台 NC 资源可达吗」的答案�
 
 但 B **不是全平台 NC 的唯一路径**：Linux 上最便宜的是主机原生
 strongSwan（XFRM 内核 ESP，编排代码与 A 完全同构，只是不用 WSL），
-macOS 也有 strongSwan + utun 变体；这些 A' 路线工作量小一个数量级，
-代价是依赖系统包管理器、不自包含。B 的真正价值是三平台统一、单
-二进制自包含、摆脱外部运行时，并顺带消除 A 的「杀进程后 SNAT
-残留」限制（状态全在进程内）。
+工作量小一个数量级，代价是依赖系统包管理器、不自包含。
+
+同时要认清 **strongSwan 自身无法三平台统一**：桌面 charon 的内核
+后端只有 Linux（XFRM）与 FreeBSD（PF_KEY），Windows 只能借道 WSL
+（A 路线即此），macOS 是硬缺口——App Store 版走 Apple 的
+NetworkExtension IKE 栈，只支持 IKEv2，连本网关的 IKEv1 主模式都
+摸不到；桌面版要在 macOS 跑就得自行把 kernel-libipsec 移植到
+utun，而那个 TUN 适配工作与 B 的 TUN 层（wireguard-go tun 包）
+重叠，等于额外背 strongSwan 的编译分发还要做 B 的活。A' 路线的
+「统一」只在编排层（Go 侧 swanctl 同构），部署形态仍是每平台一套
+（系统包 / WSL / 不存在）；B 的统一才是二进制级的——这正是 B 的
+真正价值：三平台同一二进制、自包含、摆脱外部运行时，并顺带消除
+A 的「杀进程后 SNAT 残留」限制（状态全在进程内）。
 
 ### C. 复用原厂 IPsec 栈
 
