@@ -173,12 +173,50 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 
 见上。优点：复用成熟的 IKEv1/ESP 实现；缺点：依赖 WSL2 和管理员权限。
 
-### B. 用户态自实现（wintun）
+### B. 用户态自实现（wintun / utun / XFRM）
 
-- 自行实现 IKEv1 主模式/快速模式、ESP（AES-CBC + HMAC-SHA1）、DPD 与重协商，
-  用 wintun 承载路由。
-- 无第三方运行时依赖，但工作量大（数千行），且每次运行仍需管理员创建适配器；
-  当前无法在此环境验证。
+可行性：**技术成立，属于工程量大但路径已知的问题**。依据有三：
+wireguard-go 证明 Go 用户态 VPN 数据面可在三平台承载；strongSwan
+libipsec 证明 IKE/ESP 可脱离内核；最重要的是 §2.1 已实网锁定全部
+互操作参数——IKE 自实现最怕的「对端网关认什么」（提案、模式、端口
+怪癖）已不是未知数，本路线是照着已知答案写，不是探索。难点清单：
+
+| 难点 | 内容 | 评估 |
+|:---|:---|:---|
+| IKEv1 全栈 | 主模式 6 报文 + PSK 认证 + 快速模式 + DPD + 重协商 + NAT-T | **大头，数千行级**；Go 无生产级现成库，基本手写 |
+| ESP 数据面 | 序列号 + 抗重放窗口 + AES-CBC-192 + HMAC-SHA1-96 + UDP 4500 封装 | 性能无忧（AES-NI），烦在细节正确性 |
+| TUN 层 | wintun / utun / TUN 三套平台 API | wireguard-go 的 tun 包可复用，非主要风险 |
+| 测试裁判 | mock 网关只有 REST 层，无 IKE/ESP 服务端 | 按「mock 是裁判」约定，动工前需先给 mock 实现 IKEv1 |
+| 长尾 | NAT keepalive、DPD 超时、SA 过期重协商、崩溃恢复 | 上线后的主要维护成本 |
+
+两个必须先说清的边界：
+
+- **特权不会消失**：wintun 创建适配器需要管理员、utun 需要 root、
+  路由注入全平台要特权——B 摆脱的是 WSL2 依赖，不是提权需求
+  （A 路线的 `route.exe add` 同样要管理员，这点两路线打平）。
+  产品化做法是一次性安装 privileged helper（Tailscale 模式），
+  而非每次弹 UAC。
+- **「零内核驱动」表述需精化**：Windows 的 wintun 本质是驱动
+  （`wintun.sys`，微软签名、WireGuard 维护的通用驱动，与厂商 TAP
+  不冲突，驱动冲突痛点不会回来）；macOS utun / Linux TUN 是内核
+  原生接口。`vendor-landscape.md` 的「不加载内核驱动」在 B 落地
+  后应读作「不加载**厂商私有**驱动」。
+
+B 落地后的平台承载——即「全平台 NC 资源可达吗」的答案（数据面
+层面：是）：
+
+| 平台 | 承载 | 需要什么 | 相对 A 的收益 |
+|:---|:---|:---|:---|
+| Windows | wintun + 用户态 ESP | 管理员（或一次性 helper） | 免装 WSL2、免重启 |
+| macOS | utun + 用户态 ESP | root（或一次性 helper） | 从「仅展示」变可达 |
+| Linux | TUN + 用户态 ESP；或直接 XFRM（ESP 留内核，用户态只写 IKE） | CAP_NET_ADMIN | 从「仅展示」变可达；XFRM 变体工作量减半 |
+
+但 B **不是全平台 NC 的唯一路径**：Linux 上最便宜的是主机原生
+strongSwan（XFRM 内核 ESP，编排代码与 A 完全同构，只是不用 WSL），
+macOS 也有 strongSwan + utun 变体；这些 A' 路线工作量小一个数量级，
+代价是依赖系统包管理器、不自包含。B 的真正价值是三平台统一、单
+二进制自包含、摆脱外部运行时，并顺带消除 A 的「杀进程后 SNAT
+残留」限制（状态全在进程内）。
 
 ### C. 复用原厂 IPsec 栈
 
@@ -191,4 +229,5 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
   strongSwan（接受一次重启）后，NC 账号即可在本客户端内访问内网。
 - 不具备 WSL2 条件（或非 Windows 环境）：NC 资源只有解析与展示，
   需使用原厂客户端，或让网关管理员给账号分配 TCP/UDP 应用资源。
-- B 路线适合作为长期替代（摆脱 WSL2 与管理员权限依赖）。
+- B 路线适合作为长期替代：摆脱 WSL2 依赖、三平台统一承载（特权要求
+  与 A 持平，见 §3.B）。
