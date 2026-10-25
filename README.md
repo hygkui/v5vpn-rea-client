@@ -49,6 +49,8 @@
 
 | 主题 | 结论速览 | 详细文档 |
 |:---|:---|:---|
+| 总体架构与登录主链路 | 单进程双后端；组件图 + 端到端时序图 | [`docs/architecture.md`](docs/architecture.md) |
+| 政企 VPN 客户端生态 | 两代客户端并存；四大安全职责对标与项目边界 | [`docs/vendor-landscape.md`](docs/vendor-landscape.md) |
 | 本地凭证 (setting.xml) | 用户名 Base64；口令 DES-CBC（PKCS5/7）；还原率 100% | [`docs/protocol.md`](docs/protocol.md) |
 | 协议交互流程 | 版本探针 → 认证 → 资源拉取 → 隧道透传 → 心跳 → 登出 | [`docs/protocol.md`](docs/protocol.md) |
 | 网关驱动的认证状态机 | `RESULT` 结果码按位分发因子，客户端不写死流程 | [`docs/auth-flow.md`](docs/auth-flow.md) |

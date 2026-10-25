@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 840" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',system-ui,sans-serif">
+  <defs>
+    <marker id="arL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: #ffffff; }
+    .layer { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1; }
+    .comp { fill: #ffffff; stroke: #57606a; stroke-width: 1.1; rx: 6; }
+    .ext  { fill: #f6f8fa; stroke: #95a1af; stroke-width: 1.1; stroke-dasharray: 5 3; rx: 6; }
+    text  { fill: #1f2328; }
+    .title { font-size: 17px; font-weight: 700; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .layerTitle { font-size: 12.5px; font-weight: 700; }
+    .name { font-size: 12px; font-weight: 700; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .sub { font-size: 9.5px; fill: #57606a; }
+    .subm { font-size: 9.5px; fill: #57606a; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .nameC { font-size: 12.5px; font-weight: 700; }
+    .note { font-size: 10px; fill: #57606a; }
+    .lbl { font-size: 10px; fill: #57606a; }
+    .lblm { font-size: 9.5px; fill: #0969da; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .edge { stroke: #57606a; stroke-width: 1.2; fill: none; marker-end: url(#arL); }
+    .link { stroke: #57606a; stroke-width: 1.2; fill: none; }
+    .chip { fill: #0969da; }
+    .chip2 { fill: #9a6700; } .chip3 { fill: #1a7f37; } .chip4 { fill: #8250df; }
+    .chip5 { fill: #cf222e; } .chip6 { fill: #bf8700; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .layer { fill: #161b22; stroke: #30363d; }
+      .comp { fill: #0d1117; stroke: #8b949e; }
+      .ext  { fill: #161b22; stroke: #6e7681; stroke-dasharray: 5 3; }
+      text  { fill: #e6edf3; }
+      .subtitle, .sub, .subm, .note, .lbl { fill: #8b949e; }
+      .lblm { fill: #79c0ff; }
+      .edge { stroke: #8b949e; marker-end: url(#arD); }
+      .link { stroke: #6e7681; }
+      .chip { fill: #58a6ff; }
+      .chip2 { fill: #d29922; } .chip3 { fill: #3fb950; } .chip4 { fill: #bc8cff; }
+      .chip5 { fill: #f85149; } .chip6 { fill: #e3b341; }
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="1240" height="840"/>
+
+  <!-- 标题 -->
+  <text class="title" x="40" y="32">V5VPN 后端视图</text>
+  <text class="subtitle" x="40" y="52">单进程 · 认证与资源走 HTTPS REST · 三条数据通路（端口映射 / 回环 CONNECT / WSL2 IPsec）</text>
+
+  <!-- R1 前端 -->
+  <rect class="comp" x="40" y="84" width="170" height="44" rx="22"/>
+  <text x="125" y="105" text-anchor="middle" font-size="12.5" font-weight="600">原生 WebView</text>
+  <text class="subm" x="125" y="121" text-anchor="middle">(mygo 窗口壳)</text>
+  <path class="edge" d="M 210,106 L 244,106"/>
+  <rect class="comp" x="250" y="84" width="330" height="44" rx="6"/>
+  <text class="name" x="262" y="105">/v5vpn/ 前端 (app.js)</text>
+  <text class="sub" x="262" y="121">internal/cmd/ui · 按 lastUseGateway 协议选入口</text>
+  <text class="note" x="620" y="104">两套前端物理分家（/v5vpn/ 与 /atrust/）；托盘与退出钩子由 backends.go</text>
+  <text class="note" x="620" y="121">横跨两个后端——只查询与关停，不做登录路由。</text>
+
+  <!-- C1 -->
+  <path class="edge" d="M 415,128 L 415,148"/>
+  <text class="lblm" x="423" y="144">fetch /api/*</text>
+
+  <!-- R2 UI Bridge -->
+  <rect class="layer" x="40" y="152" width="780" height="104" rx="8"/>
+  <rect class="chip2" x="56" y="165" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="177">UI Bridge —— 本地 HTTP 127.0.0.1:45678</text>
+  <text class="sub" x="320" y="177">端口被占时回退随机端口</text>
+  <rect class="comp" x="56" y="190" width="560" height="52" rx="6"/>
+  <text class="name" x="64" y="210">newAPIRouter</text>
+  <text class="subm" x="64" y="228">/api/login · /api/status · /api/sms-login · /api/cert-factor · /api/web-proxy/config …</text>
+  <rect class="comp" x="640" y="190" width="164" height="52" rx="6"/>
+  <text class="name" x="648" y="210">/proxy.pac</text>
+  <text class="subm" x="648" y="228">PAC 内容 (no-store)</text>
+
+  <!-- C2 -->
+  <path class="edge" d="M 210,256 L 210,314"/>
+
+  <!-- R3 服务层 -->
+  <rect class="layer" x="40" y="280" width="780" height="108" rx="8"/>
+  <rect class="chip3" x="56" y="293" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="305">服务层 internal/service</text>
+  <rect class="comp" x="56" y="318" width="300" height="56" rx="6"/>
+  <text class="name" x="64" y="338">VPNService</text>
+  <text class="sub" x="64" y="356">登录 · 挑战会话 authChallenge · 资源/代理/IPsec 编排</text>
+  <rect class="comp" x="388" y="318" width="300" height="56" rx="6"/>
+  <text class="name" x="396" y="338">systemproxy_*</text>
+  <text class="sub" x="396" y="356">HKCU AutoConfigURL 备份 / 写入 / 还原</text>
+  <!-- C3 systemproxy → 浏览器 -->
+  <path class="edge" d="M 688,346 L 874,346"/>
+  <text class="lblm" x="700" y="338">AutoConfigURL</text>
+  <!-- 浏览器（进程外） -->
+  <rect class="ext" x="880" y="318" width="320" height="56" rx="6"/>
+  <text class="nameC" x="888" y="338">系统浏览器</text>
+  <text class="sub" x="888" y="356">读 PAC · 经本地代理访问区间资源</text>
+  <!-- C6 浏览器 → WebProxy -->
+  <path class="edge" d="M 880,360 L 856,360 L 856,505 L 402,505 L 402,532"/>
+  <text class="lbl" x="460" y="499">读 PAC + CONNECT</text>
+
+  <!-- C4a VPNService → protocol -->
+  <path class="edge" d="M 206,374 L 206,428"/>
+  <!-- C4b VPNService → 数据面 -->
+  <path class="edge" d="M 206,374 L 206,396 L 740,396 L 740,496"/>
+  <text class="lbl" x="460" y="390">资源加载后启动三条通路</text>
+
+  <!-- R4 协议层 -->
+  <rect class="layer" x="40" y="408" width="340" height="76" rx="8"/>
+  <rect class="chip4" x="56" y="416" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="428">协议层</text>
+  <rect class="comp" x="56" y="432" width="308" height="44" rx="6"/>
+  <text class="name" x="64" y="452">internal/protocol</text>
+  <text class="sub" x="64" y="469">REST 客户端 + 心跳 (detect_interval)</text>
+
+  <!-- C5 protocol → 网关 -->
+  <path class="edge" d="M 364,454 L 820,454 L 820,424 L 874,424"/>
+  <text class="lblm" x="560" y="446">HTTPS REST</text>
+
+  <!-- 网关（进程外） -->
+  <rect class="ext" x="880" y="404" width="320" height="56" rx="6"/>
+  <text class="nameC" x="888" y="424">V5VPN 网关</text>
+  <text class="subm" x="888" y="442">HTTPS REST + SSL CONNECT</text>
+
+  <!-- R5 数据面 -->
+  <rect class="layer" x="40" y="500" width="780" height="120" rx="8"/>
+  <rect class="chip5" x="56" y="508" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="520">本地数据面</text>
+  <text class="sub" x="160" y="520">资源加载后各自就位</text>
+  <rect class="comp" x="52" y="536" width="232" height="80" rx="6"/>
+  <text class="name" x="60" y="556" font-size="11.5">proxy.ProxyManager</text>
+  <text class="sub" x="60" y="574">单端口资源 →</text>
+  <text class="sub" x="60" y="590">本地端口映射</text>
+  <rect class="comp" x="312" y="536" width="232" height="80" rx="6"/>
+  <text class="name" x="320" y="556" font-size="11.5">proxy.WebProxy</text>
+  <text class="sub" x="320" y="574">区间资源 → 回环 CONNECT</text>
+  <text class="sub" x="320" y="590">allowedHosts 白名单 · 出界 403</text>
+  <rect class="comp" x="572" y="536" width="232" height="80" rx="6"/>
+  <text class="name" x="580" y="556" font-size="11.5">internal/ipsec</text>
+  <text class="sub" x="580" y="574">NC 资源 → WSL2 strongSwan</text>
+  <text class="sub" x="580" y="590">编排 · 仅 Windows · 异步拉起</text>
+
+  <!-- C7 pm/wp → 网关 -->
+  <path class="edge" d="M 168,536 L 168,492 L 838,492 L 838,442 L 874,442"/>
+  <path class="edge" d="M 428,536 L 428,492"/>
+  <text class="lblm" x="560" y="486">CONNECT (Cookie: MapID + VSG_SESSIONID)</text>
+
+  <!-- C8 列1/列2 → 内网 -->
+  <path class="edge" d="M 168,616 L 168,648"/>
+  <path class="edge" d="M 428,616 L 428,648"/>
+
+  <!-- C9 ipsec → WSL -->
+  <path class="edge" d="M 804,576 L 840,576 L 840,588 L 874,588"/>
+  <text class="lbl" x="812" y="552">swanctl · SNAT · 路由</text>
+
+  <!-- WSL（进程外） -->
+  <rect class="ext" x="880" y="560" width="240" height="56" rx="6"/>
+  <text class="nameC" x="888" y="580">WSL2 strongSwan</text>
+  <text class="subm" x="888" y="598">IKEv1/ESP · charon:1194</text>
+
+  <!-- C10 WSL → 网关 -->
+  <path class="edge" d="M 1000,560 L 1000,464"/>
+  <text class="lblm" x="1008" y="498">IKEv1 · NAT-T UDP 4500</text>
+  <text class="lblm" x="1008" y="514">ESP (aes192-sha1)</text>
+
+  <!-- C11 网关 → 内网 / C12 WSL → 内网 -->
+  <path class="edge" d="M 1160,460 L 1160,648"/>
+  <path class="edge" d="M 1000,616 L 1000,648"/>
+
+  <!-- 内网资源（进程外） -->
+  <rect class="ext" x="40" y="652" width="1160" height="52" rx="6"/>
+  <text class="nameC" x="48" y="674">内网资源</text>
+  <text class="sub" x="48" y="692">TCP/UDP 应用 · 堡垒机（端口区间）· SECURED-ROUTE 网段（NC）</text>
+
+  <!-- R6 支撑 -->
+  <rect class="layer" x="40" y="728" width="1160" height="64" rx="8"/>
+  <rect class="chip6" x="56" y="740" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="752">支撑</text>
+  <text class="sub" x="110" y="752">VPNService 依赖</text>
+  <rect class="comp" x="56" y="760" width="340" height="26" rx="5"/>
+  <text class="name" x="64" y="777" font-size="11">internal/config</text>
+  <text class="subm" x="180" y="777">setting.xml · GatewayProfile</text>
+  <rect class="comp" x="416" y="760" width="340" height="26" rx="5"/>
+  <text class="name" x="424" y="777" font-size="11">internal/certstore</text>
+  <text class="subm" x="548" y="777">.p12/.pfx 证书库</text>
+  <rect class="comp" x="776" y="760" width="340" height="26" rx="5"/>
+  <text class="name" x="784" y="777" font-size="11">internal/crypto</text>
+  <text class="subm" x="902" y="777">DES-CBC · AES-128-CBC</text>
+
+  <!-- 脚注 -->
+  <text class="note" x="40" y="820">mock 网关（test/mock/v5vpn）扮演本图中的 V5VPN 网关——集成与 UI E2E 的裁判；图中组件名即真实包名 / 路由名，可从图直接定位代码。</text>
+</svg>
