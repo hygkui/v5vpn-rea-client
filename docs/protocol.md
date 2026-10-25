@@ -18,8 +18,7 @@ mock 网关（`test/mock/v5vpn`）为裁判（见 `test/README.md`）。
 
 ## 2. 协议交互流程 (Network Protocol)
 
-先看全景（各步字段细节在图后逐条展开；认证多跳的状态机视角见
-[`auth-flow.md`](auth-flow.md)）：
+先看全景（各步字段细节在图后逐条展开；认证多跳的状态机视角见 [`auth-flow.md`](auth-flow.md)）：
 
 ```mermaid
 sequenceDiagram
@@ -68,10 +67,7 @@ sequenceDiagram
     C->>G: ⑦ GET /vpn/user/logout （安全登出）
 ```
 
-结果码驱动而非流程写死：每提交一个因子，`RESULT` 按位掩码指出下一个
-待验因子（`0x1` 口令 / `0x2` 证书 / `0x4` 令牌 / `0x8` 短信 / `0x180`
-改密，取最低置位位），客户端循环到 `0` 为止——跳数由网关决定，事先
-不可知。
+结果码驱动而非流程写死：每提交一个因子，`RESULT` 按位掩码指出下一个待验因子（`0x1` 口令 / `0x2` 证书 / `0x4` 令牌 / `0x8` 短信 / `0x180` 改密，取最低置位位），客户端循环到 `0` 为止——跳数由网关决定，事先不可知。
 
 1. **版本探针**：`GET /vpn/version.xml` $\rightarrow$ `<VERSION major="2" minor="0"/>`。
 2. **口令认证**：`POST /vpn/user/auth/password`
