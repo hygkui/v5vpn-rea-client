@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 810" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',system-ui,sans-serif">
+  <defs>
+    <marker id="arL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arD" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <style>
+    .bg { fill: #ffffff; }
+    .layer { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1; }
+    .comp { fill: #ffffff; stroke: #57606a; stroke-width: 1.1; rx: 6; }
+    .ext  { fill: #f6f8fa; stroke: #95a1af; stroke-width: 1.1; stroke-dasharray: 5 3; rx: 6; }
+    text  { fill: #1f2328; }
+    .title { font-size: 17px; font-weight: 700; }
+    .subtitle { font-size: 12px; fill: #57606a; }
+    .layerTitle { font-size: 12.5px; font-weight: 700; }
+    .name { font-size: 12px; font-weight: 700; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .sub { font-size: 9.5px; fill: #57606a; }
+    .subm { font-size: 9.5px; fill: #57606a; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .nameC { font-size: 12.5px; font-weight: 700; }
+    .note { font-size: 10px; fill: #57606a; }
+    .lbl { font-size: 10px; fill: #57606a; }
+    .lblm { font-size: 9.5px; fill: #0969da; font-family: ui-monospace,'SF Mono',Menlo,Consolas,monospace; }
+    .edge { stroke: #57606a; stroke-width: 1.2; fill: none; marker-end: url(#arL); }
+    .link { stroke: #57606a; stroke-width: 1.2; fill: none; stroke-dasharray: 4 4; }
+    .chip { fill: #0969da; }
+    .chip2 { fill: #9a6700; } .chip3 { fill: #1a7f37; } .chip4 { fill: #8250df; }
+    .chip6 { fill: #bf8700; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .layer { fill: #161b22; stroke: #30363d; }
+      .comp { fill: #0d1117; stroke: #8b949e; }
+      .ext  { fill: #161b22; stroke: #6e7681; stroke-dasharray: 5 3; }
+      text  { fill: #e6edf3; }
+      .subtitle, .sub, .subm, .note, .lbl { fill: #8b949e; }
+      .lblm { fill: #79c0ff; }
+      .edge { stroke: #8b949e; marker-end: url(#arD); }
+      .link { stroke: #6e7681; }
+      .chip { fill: #58a6ff; }
+      .chip2 { fill: #d29922; } .chip3 { fill: #3fb950; } .chip4 { fill: #bc8cff; }
+      .chip6 { fill: #e3b341; }
+    }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="1240" height="810"/>
+
+  <!-- 标题 -->
+  <text class="title" x="40" y="32">aTrust 后端视图</text>
+  <text class="subtitle" x="40" y="52">控制面 HTTPS REST · 数据面 TLS 441 二进制流式隧道（每条连接独立建隧道）</text>
+
+  <!-- R1 前端 -->
+  <rect class="comp" x="40" y="84" width="170" height="44" rx="22"/>
+  <text x="125" y="105" text-anchor="middle" font-size="12.5" font-weight="600">原生 WebView</text>
+  <text class="subm" x="125" y="121" text-anchor="middle">(mygo 窗口壳)</text>
+  <path class="edge" d="M 210,106 L 244,106"/>
+  <rect class="comp" x="250" y="84" width="330" height="44" rx="6"/>
+  <text class="name" x="262" y="105">/atrust/ 前端</text>
+  <text class="sub" x="262" y="121">internal/cmd/ui · 按 lastUseGateway 协议选入口</text>
+  <text class="note" x="620" y="104">与 /v5vpn/ 物理分家，共享窗口壳与 UI Bridge；</text>
+  <text class="note" x="620" y="121">状态机与 V5VPN 同套（Disconnected / Connecting / Connected / Error）。</text>
+
+  <!-- C1 -->
+  <path class="edge" d="M 415,128 L 415,148"/>
+  <text class="lblm" x="423" y="144">fetch /api/atrust/* · /api/status</text>
+
+  <!-- R2 UI Bridge -->
+  <rect class="layer" x="40" y="152" width="780" height="104" rx="8"/>
+  <rect class="chip2" x="56" y="165" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="177">UI Bridge —— 本地 HTTP 127.0.0.1:45678</text>
+  <rect class="comp" x="56" y="190" width="700" height="52" rx="6"/>
+  <text class="name" x="64" y="210">newAPIRouter</text>
+  <text class="subm" x="64" y="228">/api/atrust/login · /api/atrust/status · /api/atrust/resources/refresh · /api/status (activeBackend)</text>
+
+  <!-- C2 -->
+  <path class="edge" d="M 210,256 L 210,314"/>
+
+  <!-- R3 服务层 -->
+  <rect class="layer" x="40" y="280" width="780" height="108" rx="8"/>
+  <rect class="chip3" x="56" y="293" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="305">服务层 internal/service</text>
+  <text class="note" x="540" y="305">设备标识 EnsureDeviceID —— 用户数据目录 · 首次登录后不变</text>
+  <rect class="comp" x="56" y="318" width="300" height="56" rx="6"/>
+  <text class="name" x="64" y="338">ATrustService</text>
+  <text class="sub" x="64" y="356">登录编排 · 资源加载 · 状态上报</text>
+  <rect class="comp" x="396" y="318" width="340" height="56" rx="6"/>
+  <text class="name" x="404" y="338">ATrustProxy</text>
+  <text class="sub" x="404" y="356">每资源一个本地监听端口 · 按需建连</text>
+  <!-- Start -->
+  <path class="edge" d="M 356,346 L 392,346"/>
+  <text class="lblm" x="360" y="338">Start</text>
+
+  <!-- C4 ATrustService → 控制面 -->
+  <path class="edge" d="M 150,374 L 150,428"/>
+  <text class="lbl" x="158" y="394">登录编排 / 拉资源树</text>
+
+  <!-- C5 ATrustProxy → tunnel -->
+  <path class="edge" d="M 566,374 L 566,484"/>
+  <text class="lbl" x="574" y="394">应用连入 · 按需 DialTCP</text>
+
+  <!-- R4 协议层 -->
+  <rect class="layer" x="40" y="400" width="780" height="148" rx="8"/>
+  <rect class="chip4" x="56" y="412" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="424">协议层 internal/atrust</text>
+  <text class="sub" x="230" y="424">自包含，不 import protocol / proxy</text>
+  <rect class="comp" x="56" y="432" width="440" height="44" rx="6"/>
+  <text class="name" x="64" y="452" font-size="11.5">控制面 login / endpoints / resource</text>
+  <text class="subm" x="64" y="469">manifest → authConfig → psw → authCheck → clientResource</text>
+  <!-- 控制面 → route 建索引 -->
+  <path class="edge" d="M 206,476 L 206,484"/>
+  <rect class="comp" x="56" y="488" width="340" height="44" rx="6"/>
+  <text class="name" x="64" y="508" font-size="11.5">route.go —— 路由索引</text>
+  <text class="sub" x="64" y="525">资源树 → appId / nodeGroup / 接入线路</text>
+  <rect class="comp" x="416" y="488" width="380" height="44" rx="6"/>
+  <text class="name" x="424" y="508" font-size="11.5">tunnel.go —— TCP 流式隧道</text>
+  <text class="subm" x="424" y="525">0x05 控制帧 · 0x01 数据帧 · 0x53 S 帧</text>
+  <!-- route → tunnel -->
+  <path class="edge" d="M 396,510 L 412,510"/>
+
+  <!-- C6 控制面 → 网关 -->
+  <path class="edge" d="M 496,454 L 820,454 L 820,424 L 874,424"/>
+  <text class="lblm" x="560" y="446">HTTPS REST</text>
+
+  <!-- aTrust 网关（进程外） -->
+  <rect class="ext" x="880" y="404" width="320" height="56" rx="6"/>
+  <text class="nameC" x="888" y="424">aTrust 网关</text>
+  <text class="subm" x="888" y="442">HTTPS REST 控制面</text>
+  <!-- 网关 ↔ 接入节点（同集群） -->
+  <path class="link" d="M 1000,460 L 1000,504"/>
+
+  <!-- 接入节点（进程外） -->
+  <rect class="ext" x="880" y="508" width="240" height="56" rx="6"/>
+  <text class="nameC" x="888" y="528">网关接入节点 &lt;host&gt;:441</text>
+  <text class="subm" x="888" y="546">TLS · 流式隧道端点</text>
+
+  <!-- C7 tunnel → 接入节点 -->
+  <path class="edge" d="M 796,516 L 840,516 L 840,536 L 874,536"/>
+  <text class="lbl" x="806" y="508">二进制帧</text>
+
+  <!-- C8/C9 → 内网 -->
+  <path class="edge" d="M 1040,564 L 1040,648"/>
+  <path class="edge" d="M 1160,460 L 1160,648"/>
+
+  <!-- 内网资源（进程外） -->
+  <rect class="ext" x="40" y="652" width="1160" height="52" rx="6"/>
+  <text class="nameC" x="48" y="674">内网资源</text>
+  <text class="sub" x="48" y="692">资源树 addressList 覆盖的应用 · 匹配规则：精确 IP / CIDR / 区间 / 后缀通配</text>
+
+  <!-- R5 差异说明 -->
+  <rect class="layer" x="40" y="716" width="1160" height="44" rx="8"/>
+  <rect class="chip6" x="56" y="728" width="5" height="14" rx="1"/>
+  <text class="layerTitle" x="68" y="740">与 V5VPN 后端的差异</text>
+  <text class="note" x="230" y="740">无心跳保活 · 无系统 PAC · 不依赖 certstore / crypto（仅共享 internal/config 与 UI Bridge）· 会话是服务端状态，登录先拆旧会话</text>
+
+  <!-- 脚注 -->
+  <text class="note" x="40" y="792">mock 网关（test/mock/atrust）扮演本图中的 aTrust 网关与接入节点——集成与 UI E2E 的裁判；图中组件名即真实包名，可从图直接定位代码。</text>
+</svg>

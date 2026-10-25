@@ -19,80 +19,37 @@
 
 客户端是**一个 Go 桌面进程**（mygo 框架承载原生 WebView），前后端之间
 没有跨进程 IPC——前端就是本地 HTTP 服务上的静态页面，`fetch /api/*`
-即"IPC"：
+即"IPC"。两个协议后端（V5VPN / aTrust）在代码层互不感知、链路互不
+纠缠，因此按后端分两张视图；共享部分（窗口壳、UI Bridge、支撑组件）
+在两张图里重复出现，结构相同。
 
-```mermaid
-flowchart TB
-    subgraph shell["窗口壳 mygo（internal/cmd）"]
-        webview["原生 WebView<br/>(WebView2 / WKWebView / WebKitGTK)"]
-        tray["系统托盘 + 退出钩子<br/>(backends：谁活动就关谁)"]
-    end
+托盘与退出钩子横跨两个后端（`backends.go` 在 cmd 层回答"谁活动"、
+退出时只关有会话的那个），不在单后端视图里展开。
 
-    subgraph ui["嵌入式前端 internal/cmd/ui（两套物理分家）"]
-        v5ui["/v5vpn/ 前端 (app.js)"]
-        atui["/atrust/ 前端"]
-    end
+两张视图为手绘 SVG（源文件在 `docs/diagrams/`），随浏览器浅色 /
+深色主题自适应。
 
-    subgraph bridge["UI Bridge —— 本地 HTTP 服务 127.0.0.1:45678<br/>(端口被占时回退随机端口)"]
-        api["newAPIRouter<br/>/api/login、/api/status、/api/sms-login …"]
-        pacsrv["/proxy.pac"]
-        uifs["静态 UI 资源 (embed.FS)"]
-    end
+### 1.1 V5VPN 后端视图
 
-    subgraph service["服务层 internal/service"]
-        vpns["VPNService<br/>(V5VPN 后端)"]
-        ats["ATrustService<br/>(aTrust 后端)"]
-        syspx["systemproxy_*<br/>(HKCU AutoConfigURL)"]
-    end
+认证与资源走 HTTPS REST；数据面有三条通路（单端口映射 / 回环
+CONNECT 代理 / WSL2 IPsec）。前两条全平台可用；WSL2 IPsec 仅
+Windows（macOS / Linux 上 NC 资源仅解析与展示，见
+[`ipsec.md`](ipsec.md) §4）：
 
-    subgraph protocollayer["协议层"]
-        proto["internal/protocol<br/>V5VPN REST 客户端 + 心跳"]
-        atp["internal/atrust<br/>aTrust 控制面 + 流式隧道"]
-    end
+![V5VPN 后端视图](diagrams/v5vpn-backend.svg)
 
-    subgraph data["本地数据面"]
-        pm["proxy.ProxyManager<br/>单端口资源 → 本地端口映射"]
-        wp["proxy.WebProxy<br/>区间资源 → 回环 CONNECT"]
-        ips["internal/ipsec<br/>WSL2/strongSwan 编排"]
-    end
+### 1.2 aTrust 后端视图
 
-    subgraph support["支撑"]
-        cfg["internal/config<br/>setting.xml / GatewayProfile"]
-        certs["internal/certstore<br/>(.p12/.pfx 证书库)"]
-        crypt["internal/crypto<br/>DES-CBC / AES-128-CBC"]
-    end
+控制面是 HTTPS REST（登录、应用列表）；数据面是 TLS 441 上的二进制
+流式隧道，由 `ATrustProxy` 在本地端口上按需建连——与 V5VPN 侧
+ProxyManager「一条本地连接对应一条网关连接」的形态一致，只是隧道
+协议不同（HTTP CONNECT vs 二进制帧）：
 
-    gw1["V5VPN 网关<br/>(HTTPS REST + SSL CONNECT)"]
-    gw2["aTrust 网关"]
-    wsl["WSL2 strongSwan<br/>(IKEv1/ESP)"]
-    intranet["内网资源"]
-    browser["系统浏览器"]
+![aTrust 后端视图](diagrams/atrust-backend.svg)
 
-    webview -->|"按 lastUseGateway 协议选入口<br/>(ui_routes.go)"| ui
-    v5ui -->|"fetch /api/*"| api
-    atui -->|"fetch /api/atrust/*"| api
-    api --> vpns
-    api --> ats
-    vpns --> proto
-    ats --> atp
-    proto -->|"HTTPS"| gw1
-    atp -->|"HTTPS"| gw2
-    vpns -->|"资源加载后"| pm
-    vpns -->|"资源加载后"| wp
-    vpns -->|"NC 资源，异步"| ips
-    pm -->|"CONNECT (MapID + VSG_SESSIONID)"| gw1
-    wp -->|"CONNECT (MapID + VSG_SESSIONID)"| gw1
-    ips -->|"swanctl / 路由 / SNAT"| wsl
-    wsl -->|"IKEv1 UDP 1194→4500 / ESP"| gw1
-    pm & wp --> intranet
-    wsl --> intranet
-    vpns --> syspx
-    syspx -->|"AutoConfigURL"| browser
-    browser -->|"读 PAC + CONNECT"| wp
-    vpns --- cfg
-    vpns --- certs
-    cfg --- crypt
-```
+aTrust 后端没有心跳保活与系统 PAC 接管，也不依赖证书库/加密组件；
+状态机与 V5VPN 同套（Disconnected / Connecting / Connected / Error），
+`/api/status` 以 `activeBackend` 合并两侧状态。
 
 阅读要点：
 
@@ -102,13 +59,13 @@ flowchart TB
 - **前端到后端只有一条路**：本地回环 HTTP。任何 UI 逻辑（挑战模态、
   状态轮询）最终都是 `/api/*` 请求；挑战会话（`VSG_SESSIONID`）永远
   留在 Go 侧，前端只拿 `gwId` + 结果码。
-- **三条数据通路并存**：单端口资源走本地端口映射、端口区间资源走
+- **V5VPN 三条数据通路并存**：单端口资源走本地端口映射、端口区间资源走
   回环 CONNECT 代理 + 系统 PAC、NC 资源交给 WSL2 里的 strongSwan——
   分别对应 `web-proxy.md`、`ipsec.md` 的设计文档。
-- mock 网关（`test/mock/v5vpn`、`test/mock/atrust`）扮演图中最右侧的
-  两个网关，是集成与 UI E2E 的裁判。
+- mock 网关（`test/mock/v5vpn`、`test/mock/atrust`）分别扮演两张图里
+  的网关，是集成与 UI E2E 的裁判。
 
-## 2. 登录主链路：从点击到资源可用
+## 2. 登录主链路（V5VPN）：从点击到资源可用
 
 一次口令登录在组件间的完整路径（认证挑战的多跳细节见
 [`auth-flow.md`](auth-flow.md)，端点字段见 [`protocol.md`](protocol.md)）：
