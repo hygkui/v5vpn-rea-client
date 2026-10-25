@@ -55,7 +55,7 @@ flowchart LR
     app["Windows 应用<br/>(浏览器 / 客户端)"]
     winroute["Windows 路由表<br/>SECURED-ROUTE → 指向 WSL 地址<br/>(需管理员权限)"]
     subgraph wsl["WSL2 发行版 v5vpn"]
-        snat["iptables SNAT<br/>目标地址 → 会话虚拟 IP"]
+        snat["iptables SNAT<br/>匹配目标网段，源地址 → 会话虚拟 IP"]
         charon["strongSwan / charon<br/>swanctl 配置（按会话重建）<br/>本地监听 UDP 1194"]
         xfrm["XFRM / ESP<br/>aes192-sha1"]
     end
@@ -110,8 +110,8 @@ sequenceDiagram
 - `internal/ipsec`：从 NC 资源生成 swanctl 配置，启动/停止连接，管理路由与 SNAT。
 - `VPNService`：资源拉取成功后自动启动隧道，`/api/status` 暴露
   `ipsecState` / `ipsecError`，界面显示状态条。
-- Windows 路由：把每个 `SECURED-ROUTE` 指向 WSL 地址；WSL 内把这些目标
-  SNAT 到会话虚拟 IP，再交给 XFRM/ESP。添加 Windows 路由需要管理员权限；
+- Windows 路由：把每个 `SECURED-ROUTE` 指向 WSL 地址；WSL 内把发往这些目标
+  网段的数据包源地址 SNAT 为会话虚拟 IP，再交给 XFRM/ESP。添加 Windows 路由需要管理员权限；
   非管理员时隧道仍然建立，但只有 WSL 内可访问，界面会提示。
 
 ### 2.1 实网验证到的关键参数（勿随意改动）
@@ -167,11 +167,44 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 - 会话被强制结束（直接杀进程）时不会执行清理；重新登录会覆盖配置，
   但旧的 SNAT 规则需要 `iptables -t nat -S POSTROUTING` 手动核对。
 
+### 2.3 无 WSL 环境时的表现与降级策略
+
+如果 Windows 用户机器上未安装 WSL 或未导入 `v5vpn` 发行版：
+
+- **登录与非 NC 资源零影响**：
+  - TCP/UDP 单端口映射（L4 本地转发）与网页/端口区间资源（本地回环 CONNECT 代理 + 系统 PAC）
+    完全由宿主机 Go 进程在用户态承载，不依赖任何虚拟网卡、内核驱动或 WSL，
+    也不需要管理员特权，登录后完全正常可用。
+- **NC 资源独立降级**：
+  - 登录成功并解析出 `NC_RESOURCE` 后，后台异步探测 WSL 发行版可用性；
+  - 若未检测到 WSL，`ipsecState` 状态机落到 `unavailable`，前端资源列表仍
+    正常展示，连接页顶部状态条给出明确提示（「未检测到 WSL 环境，请运行配置脚本」）；
+  - 隧道拉起失败不会阻断用户登录流程，亦不会影响其它已连接的代理端口。
+- **用户的处置选择**：
+  1. **一次性配置 WSL**：以管理员身份运行 `scripts/setup-ipsec-wsl.ps1`
+     （启用 WSL 与虚拟机平台特性、导入内置 strongSwan 的 Ubuntu rootfs，需重启系统一次）；
+  2. **网关改配应用资源**：若受限于公司 IT 策略无法开启 Hyper-V / WSL2，可联系
+     网关管理员将该账号的权限从全网状 NC 资源变更为具体的 TCP/UDP 应用端口资源，
+     即可彻底免除 WSL 依赖与提权需求。
+
 ## 3. 其他实现路径（备选）
 
 ### A. 当前方案（WSL2 + strongSwan）
 
 见上。优点：复用成熟的 IKEv1/ESP 实现；缺点：依赖 WSL2 和管理员权限。
+
+### A'. Linux 宿主机原生 strongSwan（单平台低成本扩展）
+
+Linux 内核原生自带 XFRM（IPsec 协议栈）与 Netfilter，宿主机可直接运行
+strongSwan 守护进程（charon），完全不需要 WSL 这层虚拟机开销：
+
+- **原理与优势**：Go 侧编排逻辑（`swanctl.conf` 配置生成、`iptables` SNAT、
+  路由管理）与 Windows WSL 方案完全同构，仅需去掉 `wsl.exe` 调用；工作量
+  相比从零自写协议栈小一个数量级。
+- **代价与局限**：依赖系统包管理器安装 strongSwan（非单二进制自包含），
+  且添加路由与操作 XFRM/iptables 仍需宿主系统的 `root` 或 `CAP_NET_ADMIN`
+  特权。当前客户端未接管宿主 strongSwan，主要是因 `internal/ipsec/manager.go`
+  仍以 Windows 桌面为主、硬编码了 WSL 调用。
 
 ### B. 用户态自实现（wintun / utun / XFRM）
 
@@ -223,10 +256,27 @@ Linux XFRM 变体还可把 ESP 留内核）与互操作（参数已实网锁定�
   原生接口。`vendor-landscape.md` 的「不加载内核驱动」在 B 落地
   后应读作「不加载**厂商私有**驱动」。
 
-**特权不会消失**——它的来源不是 IPsec 协议（IKE 是普通 UDP、
-加解密是用户态运算，均零特权），而是三件碰系统的事：**建 TUN
-设备、改路由表、注入内核接口**。本项目单端口/区间资源零特权，
-正是因为走本地代理端口、三件事一件不碰。各平台承载的特权形态：
+#### 为什么特权无法避免（B 路线摆脱的是 WSL2，不是提权）
+
+一个常见的架构疑问是：「既然做成了纯 Go 用户态 IPsec，是不是就能免管理员权限运行了？」
+
+**答案是：不能。全平台三层网络接管都必须系统特权。**
+
+特权的来源不是 IPsec 协议本身（IKE 是普通 UDP 报文通信，ESP 加解密是 CPU 用户态
+运算，两者均为普通用户态逻辑，零特权），而是操作系统对**三层网络接管的安全防线**：
+
+1. **创建/打开 TUN 虚拟网卡设备**：
+   - Windows：调用 Wintun API 创建适配器需要系统管理员权限；
+   - macOS：打开 `/dev/utun` 设备需要 `root` 权限；
+   - Linux：打开 `/dev/net/tun` 需要 `root` 或 `CAP_NET_ADMIN`。
+2. **系统路由表注入**：
+   - 将内网网段（`SECURED-ROUTE`，如 `10.0.0.0/8`）指向 TUN 适配器，全平台
+     修改系统路由表均属于内核级特权操作。
+
+因此，**B 路线解决的是摆脱 WSL2 笨重依赖与实现三平台单一二进制，而不是消除特权需求**
+（A 路线修改 Windows 路由同样需要管理员权限，二者在特权要求上打平）。
+
+各平台承载的特权形态速查：
 
 | 平台 | 承载 | 特权点 | 用户感知 |
 |:---|:---|:---|:---|
@@ -253,28 +303,55 @@ B 落地后的平台承载——即「全平台 NC 资源可达吗」的答案�
 strongSwan（XFRM 内核 ESP，编排代码与 A 完全同构，只是不用 WSL），
 工作量小一个数量级，代价是依赖系统包管理器、不自包含。
 
-同时要认清 **strongSwan 自身无法三平台统一**：桌面 charon 的内核
-后端只有 Linux（XFRM）与 FreeBSD（PF_KEY），Windows 只能借道 WSL
-（A 路线即此），macOS 是硬缺口——App Store 版走 Apple 的
-NetworkExtension IKE 栈，只支持 IKEv2，连本网关的 IKEv1 主模式都
-摸不到；桌面版要在 macOS 跑就得自行把 kernel-libipsec 移植到
-utun，而那个 TUN 适配工作与 B 的 TUN 层（wireguard-go tun 包）
-重叠，等于额外背 strongSwan 的编译分发还要做 B 的活。A' 路线的
-「统一」只在编排层（Go 侧 swanctl 同构），部署形态仍是每平台一套
-（系统包 / WSL / 不存在）；B 的统一才是二进制级的——这正是 B 的
-真正价值：三平台同一二进制、自包含、摆脱外部运行时，并顺带消除
-A 的「杀进程后 SNAT 残留」限制（状态全在进程内）。
+#### 为什么 strongSwan 自身无法达成三平台统一？
+
+既然 Linux 原生 strongSwan 表现良好、Windows 可借道 WSL，能否直接让 strongSwan 覆盖 macOS，从而实现三平台统一？
+
+**结论是：无法在 macOS 走通，strongSwan 自身无法实现桌面三平台统一。**
+
+- **macOS 的协议版本断层（致命硬伤）**：
+  - 本网关强制要求 **IKEv1 主模式 (Main Mode) + PSK**；
+  - macOS 现代系统级网络框架（NetworkExtension）**仅支持 IKEv2**，根本无法协商
+    老旧的 IKEv1 主模式；
+  - strongSwan 官方针对 macOS 开发的 GUI 客户端也是基于 Apple NetworkExtension
+    框架构建的，因此连上该网关在协议层就直接被拒。
+- **桌面 charon 移植成本过高**：
+  - macOS 既没有 Linux 的内核 XFRM，也不开放 raw PF_KEY 接口；
+  - 若想在 macOS 运行 strongSwan 传统的 `charon` 守护进程，必须自行把
+    `kernel-libipsec` 移植桥接到 macOS 的 `/dev/utun` 接口；
+  - 该 TUN 适配工作量与自写用户态 ESP（B 路线）几乎完全重叠，且项目还需额外背负
+    strongSwan 复杂的 C 语言跨平台交叉编译与动态库打包分发负担。
+- **统一维度的差异**：
+  - strongSwan 路线（A/A'）的「统一」仅停留在 Go 编排层的 swanctl 脚本同构，
+    底层运行时在各平台完全割裂（Windows 依赖 WSL2、Linux 依赖系统 apt/dnf 包、macOS 不可用）；
+  - 只有纯 Go 用户态 IPsec（B 路线）才能做到**二进制级别的真统一**（单二进制无外部运行时、
+    自包含、消除退出残留）。
 
 ### C. 复用原厂 IPsec 栈
 
 - 通过 32 位辅助进程加载原厂 DLL 并驱动其 IPsec 引擎。
 - 依赖已安装的原厂客户端，不能随项目分发，跨机器不可用；仅适合本机临时方案。
 
+### D. 方案对比总览
+
+| 方案 | 跨平台覆盖 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核影响 | 优缺点与定位 |
+|:---|:---|:---|:---|:---|:---|
+| **A. WSL2 + strongSwan**<br/>*(当前实网落地)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu rootfs、strongSwan | 运行时需管理员（注入 Windows 路由；WSL 内部免感） | 零宿主驱动；流量经 Hyper-V 虚拟网络进入 WSL 内核 XFRM | **现状方案**：复用成熟 IKEv1 栈落地最快；缺点是安装包大、需启用 WSL 并重启一次 |
+| **A'. 宿主机 strongSwan**<br/>*(单平台扩展)* | 仅 Linux | 依赖系统包管理器安装 strongSwan 软件包 | 需 `root` 或 `CAP_NET_ADMIN`（XFRM/路由） | 零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | **Linux 最佳捷径**：免虚拟机、编排同构；缺点是无法自包含、依赖宿主环境 |
+| **B. 纯 Go 用户态 IPsec**<br/>*(长期演进目标)* | Windows / macOS / Linux **三平台统一** | **零外部依赖**（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 需通用 `wintun.sys`（无厂商冲突）；macOS/Linux 使用系统原生 TUN | **终极形态**：全平台同构、真自包含；缺点是工程量大（手写 IKEv1/ESP、Privileged Helper） |
+| **C. 原厂 DLL 注入**<br/>*(本机临时方案)* | 仅 Windows | 强依赖本机已安装的原厂 32 位客户端及相关 DLL | 依原厂权限要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`） | 仅能作为逆向测试或本机过渡验证，不可分发 |
+
 ## 4. 结论
 
-- 数据面已按 A 路线落地（§2，实网验证通过）：管理员安装一次 WSL2 +
-  strongSwan（接受一次重启）后，NC 账号即可在本客户端内访问内网。
-- 不具备 WSL2 条件（或非 Windows 环境）：NC 资源只有解析与展示，
-  需使用原厂客户端，或让网关管理员给账号分配 TCP/UDP 应用资源。
-- B 路线适合作为长期替代：摆脱 WSL2 依赖、三平台统一承载（特权要求
-  与 A 持平，见 §3.B）。
+- **现状落地（A 路线）**：Windows 上 NC 账号通过 WSL2 + strongSwan 承载，
+  已实网验证通过（管理员一次性配置 WSL2 + strongSwan，接受一次重启）。
+- **无 WSL / 非 Windows 环境的表现**：
+  - TCP/UDP 单端口映射与网页/区间 PAC 代理全平台可用，零驱动、零特权、零 WSL 依赖；
+  - NC 资源降级为 `unavailable` 并给出提示，用户可选择跑脚本安装 WSL，或由管理员改配为应用资源。
+- **跨平台可行性定性**：
+  - Linux 宿主机原生 strongSwan（A' 路线）低成本可行；
+  - macOS 受限于系统 NetworkExtension 仅支持 IKEv2 以及缺少 XFRM/PF_KEY，无法复用 strongSwan；
+  - strongSwan 自身无法达成桌面三平台统一。
+- **长期形态（B 路线）**：
+  - 纯 Go 用户态 IPsec（wintun / utun / TUN）是达成三平台统一单二进制的唯一自包含路径；
+  - 三层网络接管决定了全平台均无法免除系统管理员特权，产品化方向采用 Privileged Helper 模式。
