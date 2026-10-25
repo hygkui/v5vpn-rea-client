@@ -16,7 +16,7 @@
 ## 1. 目标与技术参考
 
 - **分析研究参考**：[morluto/rea](https://github.com/morluto/rea)
-- **待分析目标软件**：`C:\Program Files (x86)\V5VPN` (天清汉马 / 网御星云 / LeadSec 系列 VPN)
+- **待分析目标软件**：(天清汉马 / 网御星云 / LeadSec 系列 VPN)
 - **重新实现技术架构**：[egoist/mygo](https://github.com/egoist/mygo) (纯 Go 桌面开发框架，系统原生 WebView2 + 强类型 IPC)
 
 ---
