@@ -41,7 +41,28 @@ aTrust）各一条协议链，双后端并存、界面独立切换（见
 |:---|:---|:---|:---|
 | 跨平台兼容（信创生态） | 老客户端对统信 UOS、麒麟及 ARM 芯片（鲲鹏、飞腾）支持差，断连、装不上是常态 | 纯 Go + 系统原生 WebView（WebView2 / WKWebView / WebKitGTK），无平台专有依赖 | README §7 平台矩阵 |
 | 浏览器组件依赖（ActiveX / JRE） | 老客户端依赖 IE 的 ActiveX 插件或老旧 JRE，Win11 抛弃 IE 后频繁报「无法初始化、找不到网卡驱动」；新一代已转向独立 Agent 或 HTML5 免客户端 | 独立 Agent：本地回环 HTTP 服务 + 内嵌 Web 前端，零浏览器插件 | [`architecture.md`](architecture.md) |
-| 虚拟网卡驱动冲突 | 客户端安装 TUN/TAP 虚拟网卡，与多厂商 VPN 或虚拟机（VMware / VirtualBox）共存时驱动冲突，本地断网甚至蓝屏 | **不装虚拟网卡**、主机进程零内核驱动：路由走 Windows 路由表条目，加解密在 WSL2 内核的 XFRM/ESP 完成（TUN 的两个职责均有替代，见 [`ipsec.md`](ipsec.md) §2）。单端口与区间资源走本地端口映射 / 回环 CONNECT（全平台；系统 PAC 仅 Windows，其他平台可 `--proxy-server` 手动指定）；NC 资源 → WSL2 strongSwan（**仅 Windows**，macOS / Linux 上仅解析与展示——需原厂客户端，或网关侧改配 TCP/UDP 资源，见 [`ipsec.md`](ipsec.md) §4） | [`web-proxy.md`](web-proxy.md)、[`ipsec.md`](ipsec.md) |
+| 虚拟网卡驱动冲突 | 客户端安装 TUN/TAP 虚拟网卡，与多厂商 VPN 或虚拟机（VMware / VirtualBox）共存时驱动冲突，本地断网甚至蓝屏 | **全平台根除，不是绕过**：任何 OS 上本项目都不装虚拟网卡、不加载内核驱动——驱动冲突的载体不存在。代价是 NC（IPsec）资源需要替代承载：Windows 有（WSL2），其余平台暂无，见下表分平台速查 | [`web-proxy.md`](web-proxy.md)、[`ipsec.md`](ipsec.md) |
+
+分平台速查（「痛点解决了没」的完整答案）：
+
+| 平台 | 驱动冲突 | TCP/UDP 单端口资源 | 端口区间资源 | NC（IPsec）资源 |
+|:---|:---|:---|:---|:---|
+| Windows | ✅ 零驱动，无从冲突 | ✅ 本地端口映射 | ✅ 回环 CONNECT + 系统 PAC | ✅ WSL2 strongSwan 承载；路由只是 Windows 路由表条目，加解密在 WSL 内核 XFRM/ESP |
+| Linux | ✅ 零驱动，无从冲突 | ⚠️ 代码全平台，未实测（README §7） | ⚠️ 本地代理可用；无系统 PAC，浏览器需 `--proxy-server` | ❌ 仅解析与展示 |
+| macOS | ✅ 零驱动，无从冲突 | ⚠️ 同 Linux | ⚠️ 同 Linux | ❌ 仅解析与展示 |
+
+- 驱动冲突一列全绿的原因：原厂把路由与加解密都放进内核驱动
+  （`SecTap.sys` / `ndislwf.sys`），本项目两者都在别处——路由走
+  Windows 路由表条目，加解密走 WSL 内核 XFRM 或网关侧隧道，
+  主机进程自始至终没有内核组件。
+- **Windows 不装 WSL**：登录与其余资源完全不受影响；NC 资源降级
+  为 `unavailable` 并提示一次性安装（`scripts/setup-ipsec-wsl.ps1`，
+  需管理员 + 重启一次）。想不装 WSL 又要用 NC 资源，只能等 B 路线
+  （用户态 IPsec，[`ipsec.md`](ipsec.md) §3）或网关侧改配。
+- macOS / Linux 上 NC 资源的出路：用原厂客户端，或请网关管理员把
+  账号资源改为 TCP/UDP 应用资源（[`ipsec.md`](ipsec.md) §4）；
+  长期替代是用户态自实现 IPsec 的 B 路线（[`ipsec.md`](ipsec.md) §3），
+  macOS 上需 utun。
 
 ## 4. 小结
 
