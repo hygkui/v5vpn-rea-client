@@ -1,7 +1,6 @@
 # 发版与 Release 流程
 
-本文说明如何把一次改动发布为 GitHub Release，以及发布说明、版本号、
-自动更新清单之间的关系。适用于 `hygkui/v5vpn-rea-client`。
+本文说明如何把一次改动发布为 GitHub Release，以及发布说明、版本号、自动更新清单之间的关系。适用于 `hygkui/v5vpn-rea-client`。
 
 ---
 
@@ -15,8 +14,7 @@ on:
     tags: ["v*"]
 ```
 
-把 PR merge 进 `master` 只会触发 `.github/workflows/ci.yml`（测试 + 交叉编译），
-**不会产生 Release**。需要发版时必须手动打并推送 tag。
+把 PR merge 进 `master` 只会触发 `.github/workflows/ci.yml`（测试 + 交叉编译），**不会产生 Release**。需要发版时必须手动打并推送 tag。
 
 ---
 
@@ -32,10 +30,7 @@ on:
 | `internal/cmd/ui/atrust/index.html` | 4 处 `version-badge` / `app-version-text` | aTrust 界面显示的版本徽标 |
 | `CHANGELOG.md` | `## 0.2.1` 标题 | 发布说明来源 |
 
-`internal/cmd/version_test.go` 会替 CI 校验这些副本：
-`TestAppVersionMatchesMygoJSON` 比较 mygo.json 与 main.go，
-`TestUIVersionBadgesMatchAppVersion` 检查两套 index.html 的全部版本徽标，
-任何一处漂移都会让 CI 失败。
+`internal/cmd/version_test.go` 会替 CI 校验这些副本：`TestAppVersionMatchesMygoJSON` 比较 mygo.json 与 main.go，`TestUIVersionBadgesMatchAppVersion` 检查两套 index.html 的全部版本徽标，任何一处漂移都会让 CI 失败。
 
 > `AppVersion` 与网关协议版本 `"2.0"` 无关，不要混用。
 
@@ -46,8 +41,7 @@ on:
 `CHANGELOG.md` 是**唯一的发布说明来源**。约定：
 
 - 一级标题 `# 更新日志`；
-- 每个版本一个二级标题，精确匹配版本号：`## 0.2.1`；
-  也兼容 Keep a Changelog 的 `## [0.2.1] - 2026-10-19` 写法（workflow 会去掉方括号）；
+- 每个版本一个二级标题，精确匹配版本号：`## 0.2.1`；也兼容 Keep a Changelog 的 `## [0.2.1] - 2026-10-19` 写法（workflow 会去掉方括号）；
 - 开发中的改动先写在 `## Unreleased` 下，发版时改名为 `## <版本号>`；
 - **内容用中文书写**。
 
@@ -56,16 +50,11 @@ on:
 1. GitHub Release 的正文（`release.yml` 的 `Draft release` job 用 awk 提取对应段落）；
 2. `update-<os>-<arch>.json` 清单的 `notes` 字段——客户端「检查更新」弹窗直接展示它。
 
-如果 CHANGELOG 里找不到对应版本段落，workflow 会回退到
-`gh release create --generate-notes`（英文自动生成），因此务必先写好段落。
+如果 CHANGELOG 里找不到对应版本段落，workflow 会回退到 `gh release create --generate-notes`（英文自动生成），因此务必先写好段落。
 
 ### 弹窗短摘要：UPDATES.md
 
-更新弹窗是原生对话框，**不渲染 Markdown**，且不适合长文。因此 manifest 的
-`notes` 不取自 CHANGELOG，而是取自根目录 `UPDATES.md`（`mygo.json` 里
-`updates.changelog` 指定）：每个版本一段导语 + 若干条一句话要点，**10 行以内**，
-不用 `###` 小标题、表格、代码块。发版时与 CHANGELOG 同步新增 `## <版本号>`
-段落；详细内容只写进 CHANGELOG。
+更新弹窗是原生对话框，**不渲染 Markdown**，且不适合长文。因此 manifest 的 `notes` 不取自 CHANGELOG，而是取自根目录 `UPDATES.md`（`mygo.json` 里 `updates.changelog` 指定）：每个版本一段导语 + 若干条一句话要点，**10 行以内**，不用 `###` 小标题、表格、代码块。发版时与 CHANGELOG 同步新增 `## <版本号>` 段落；详细内容只写进 CHANGELOG。
 
 ---
 
@@ -93,16 +82,13 @@ git push origin v0.2.1
 
 推送 tag 后 `Release` workflow 自动执行，依次为：
 
-1. **Draft release**：校验 tag 与 `mygo.json` 版本一致，创建 draft，
-   写入 CHANGELOG 对应段落；
-2. **mygo build**：macOS / Windows / Linux 三平台（amd64 + arm64）构建并上传
-   全量包与增量 delta 到该 draft；
+1. **Draft release**：校验 tag 与 `mygo.json` 版本一致，创建 draft，写入 CHANGELOG 对应段落；
+2. **mygo build**：macOS / Windows / Linux 三平台（amd64 + arm64）构建并上传全量包与增量 delta 到该 draft；
 3. **Publish release**：全部构建通过后 `gh release edit --draft=false` 转为正式发布。
 
 任一平台构建失败则不会发布，draft 保留在 Releases 页面可排查。
 
-版本号选择遵循语义化版本：新功能升次版本号（`0.1.x → 0.2.0`），
-修复升补丁号（`0.2.0 → 0.2.1`）。
+版本号选择遵循语义化版本：新功能升次版本号（`0.1.x → 0.2.0`），修复升补丁号（`0.2.0 → 0.2.1`）。
 
 ---
 
@@ -126,9 +112,7 @@ curl -sS -o /dev/null -w '%{redirect_url}\n' \
 curl -sSL https://github.com/hygkui/v5vpn-rea-client/releases/latest/download/update-windows-amd64.json
 ```
 
-客户端更新检查逻辑（`internal/service/vpn_service.go` 的 `CheckForUpdates`）
-按顺序尝试：清单 `update-*.json` → `releases/latest` 的 302 → GitHub REST API。
-前两条不受 API 限流影响。
+客户端更新检查逻辑（`internal/service/vpn_service.go` 的 `CheckForUpdates`）按顺序尝试：清单 `update-*.json` → `releases/latest` 的 302 → GitHub REST API。前两条不受 API 限流影响。
 
 ---
 
@@ -149,20 +133,12 @@ gh release edit v0.1.0 --notes-file path/to/notes.md
 
 ## 7. 常见问题
 
-**Q: merge 了 PR，为什么没有新 Release？**
-A: 设计如此，只有 tag push 会触发发布（见第 1 节）。
+**Q: merge 了 PR，为什么没有新 Release？** A: 设计如此，只有 tag push 会触发发布（见第 1 节）。
 
-**Q: workflow 报 tag 与 `mygo.json` 不一致？**
-A: 第 2 节的四处版本号没同步，或 tag 打在了错误提交上。
+**Q: workflow 报 tag 与 `mygo.json` 不一致？** A: 第 2 节的四处版本号没同步，或 tag 打在了错误提交上。
 
-**Q: Release 正文是英文？**
-A: `CHANGELOG.md` 没有对应版本的中文段落，走了 `--generate-notes` 回退。
-补好段落重新推送 tag（先删远端 tag：`git push origin :refs/tags/vX.Y.Z`），
-或直接 `gh release edit` 修正正文。
+**Q: Release 正文是英文？** A: `CHANGELOG.md` 没有对应版本的中文段落，走了 `--generate-notes` 回退。补好段落重新推送 tag（先删远端 tag：`git push origin :refs/tags/vX.Y.Z`），或直接 `gh release edit` 修正正文。
 
-**Q: 小改动需要发版吗？**
-A: 不需要。修复合并进 `master` 后，在下一次正常发版时随版本发布即可。
+**Q: 小改动需要发版吗？** A: 不需要。修复合并进 `master` 后，在下一次正常发版时随版本发布即可。
 
-**Q: 更新检查测试失败？**
-A: `TestLiveVPNServiceCheckForUpdates` 会真实联网。它不硬编码最新版本，
-而是先探测线上最新版再断言。本地不想联网时用 `go test -short ./...` 跳过。
+**Q: 更新检查测试失败？** A: `TestLiveVPNServiceCheckForUpdates` 会真实联网。它不硬编码最新版本，而是先探测线上最新版再断言。本地不想联网时用 `go test -short ./...` 跳过。

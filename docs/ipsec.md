@@ -1,10 +1,18 @@
 # IPsec（NC 资源）支持现状与实现路径
 
-本文记录 V5VPN 网关下发 `<NC_RESOURCE>`（Network Connect / IPsec 全网状）时的处理方式，以及完整数据面尚未实现的原因与可选路径。
+本文系统阐明 V5VPN 网关下发 `<NC_RESOURCE>`（Network Connect 全网状三层隧道）时的业务目标、技术痛点、当前 Windows 落地现状，以及跨平台统一的备选方案评估与演进代价。
 
-## 1. NC 资源：是什么，为什么特殊
+---
 
-网关对某些账号策略下发的不是 `<TCPUDP_RESOURCE>`（WEB 资源 / TCP 应用，客户端为每个资源起本地代理并用 HTTP CONNECT 透传），而是一个 `<NC_RESOURCE>`：
+## 1. 这个是要干啥？（目标与背景）
+
+在 V5VPN 体系中，网关给客户端下发的内网访问策略分为两类：
+
+1. **应用资源（`<TCPUDP_RESOURCE>` / `<WEB_RESOURCE>`）**：
+   - 针对特定目标 IP 和单个端口（如 `10.70.0.10:80`）；
+   - 客户端在本地回环起监听代理（L4 端口转发或 L7 HTTP CONNECT 代理），应用流量发往本地回环端口即可直达，**零特权、零驱动、全平台通用**。
+2. **NC 资源（`<NC_RESOURCE>`，全网状三层网络直连）**：
+   - 网关下发的是一组内网网段路由（`SECURED-ROUTE`，如 `10.0.0.0/8`、`198.51.100.0/24`）和一个会话虚拟内网 IP（`PRIVATE-IP`）：
 
 ```xml
 <RESOURCE_LIST>
@@ -25,264 +33,201 @@
 </RESOURCE_LIST>
 ```
 
-这是 **IKEv1 主模式 + 预共享密钥 + ESP 隧道模式** 的全网状 IPsec，客户端拿到的是一组内网路由（`SECURED-ROUTE` / `SECURED-ROUTES`）和一个虚拟内网 IP（`PRIVATE-IP`）。原厂客户端通过内核虚拟网卡（`SecTap.sys` / `ndislwf.sys`）承载这些路由；本客户端没有内核态组件，数据面交给 WSL2 里的 strongSwan 承载（见 §2）。
+> **说明**：文档中出现的 `198.51.100.0/24` 和 `203.0.113.0/24` 遵循 [RFC 5737](https://datatracker.ietf.org/doc/html/rfc5737) 文档保留网段规范（TEST-NET），**仅作为示例与本地 Mock 夹具地址**，避免泄露真实政企内网拓扑。真实环境中此处的 IP、端口与路由网段均由网关动态下发。
 
-解析与编排的分工：
+- **核心诉求**：客户端认证成功后，需要建立一条标准 IPsec 隧道（IKEv1 主模式 + PSK + ESP 隧道），使得用户无论是在浏览器中输入内网网段内的任意 IP，还是在终端中执行 `ssh`、`ping`、数据库连接，流量都能被透明接管并送入 VPN 隧道。
+- **项目定位约束**：原厂客户端通过强装闭源专有内核驱动（`SecTap.sys` / `ndislwf.sys`）来实现网络接管，这极易与其它 VPN、杀毒软件或虚拟机（VMware/VirtualBox）引发蓝屏或断网冲突。本项目的原则是**杜绝厂商私有驱动，避免驱动冲突与系统崩溃**。
 
-- `internal/protocol/models.go` 解析 `NC_RESOURCE`（IKE 参数、虚拟 IP、隧道与路由）；`PSK` 带 `json:"-"`，不会进入 API 或界面。
-- `SummarizeNCResources` 生成不含密钥的摘要，`/api/status` 以 `ipsecResources` 下发。
-- NC 隧道不产生本地代理行：当 TCP/UDP 资源为 0 时，资源表列出下发的隧道名称与路由，并按 `ipsecState` 给出隧道状态（状态条见连接页顶部），而不是只显示「未发现资源」。
-- 资源加载后若存在 NC 资源，日志记录一条 INFO 并异步拉起隧道；建立失败以 ERROR 记录，便于排查「登录成功但 0 资源」。
+---
 
-## 2. 数据面：WSL2 + strongSwan（已实网验证）
+## 2. 遇到了什么问题？（核心难点与冲突）
 
-数据面不在 Go 里重写 IKE，而是把 strongSwan 跑在 WSL2 里，Go 侧负责编排：
+要实现 NC 资源的全网状透明接管，在工程落地上面临以下四大核心难点：
+
+### 2.1 协议老旧与网关怪癖
+- **强制使用 IKEv1 主模式（Main Mode）**：网关不支持现代 IKEv2，强制要求经典的 6 报文主模式 + 预共享密钥（PSK）握手。
+- **非标准端口怪癖**：控制面通信网关强制要求**本地 UDP 1194 端口向远端 UDP 1194 端口握手**（非标 500 端口）。从标准 500 端口发出的包网关直接静默丢弃。
+- **系统原生栈断层**：现代操作系统对老旧协议已逐步封杀。以 macOS 为例，其现代系统级网络框架 `NetworkExtension` 仅支持 IKEv2，完全无法与该网关完成协商。
+
+### 2.2 三层接管必须具备操作系统最高特权
+- 普通端口代理只需 bind 本地非特权端口（如 `127.0.0.1:随机高端口`），零特权；
+- 但全网状三层网络需要：
+  1. **创建/打开 TUN 虚拟网卡设备**；
+  2. **向操作系统路由表注入网段条目**（如 `route add 198.51.100.0/24 ...`）。
+- **特权不可绕过**：无论是 Windows、macOS 还是 Linux，操作系统内核安全模型严格限制了修改路由表和操作底层网络接口的权限，**必须拥有管理员权限（Administrator / root / CAP_NET_ADMIN）**。
+
+### 2.3 其他网络软件开启 TUN 模式引发的路由抢占与流量劫持
+用户在实际使用中经常反馈：“明明 VPN 显示已连接，但内网网页或服务打不开，把电脑上其他网络或代理软件的 TUN 模式关掉就立刻正常了”。这是三层透明 VPN 的必然物理规律：**同一台机器上的全局三层网络接管只能由一个工具独占，要访问内网资源就不能同时开启其他软件的 TUN 模式，二者天然互斥，无法兼得**。
+
+- **冲突机理**：
+  - 其他网络或代理工具开启「TUN 模式」后，通常会以最高优先级向系统注入覆盖全网的默认兜底路由（如 `0.0.0.0/1` 和 `128.0.0.0/1`），甚至在底层网络驱动（如 Windows WFP）强制拦截所有外发数据包；
+  - 当 VPN 客户端把 `198.51.100.0/24` 的路由加入系统时，发往内网资源的数据包依然会被其他软件的 TUN 虚拟网卡优先截获；
+  - 其他软件根本无法识别政企内网私有网段，流量被错误转发至外部节点或直接丢弃，导致内网彻底失联；
+- **关键结论与要求**：
+  - **要访问内网资源就不要同时开启其他 TUN 软件**（原厂客户端同样无法避免此冲突）；
+  - 客户端必须具备明确的**强提醒机制**：在内网连不上时，第一时间提醒用户**必须彻底关闭其他网络工具的 TUN 模式，否则内网无法正常使用**。
+
+### 2.4 跨平台操作系统内核网络栈割裂
+- **Windows**：网络栈闭源，没有 Linux 原生 XFRM 概念，三层接管通常依赖 NDIS 虚拟网卡；
+- **Linux**：原生自带成熟的 XFRM 内核态 IPsec 与 Netfilter；
+- **macOS**：无 XFRM，关闭了 raw PF_KEY，封闭性极高。
+
+---
+
+## 3. 目前现状：Windows WSL2 + strongSwan 是如何跑通的？
+
+为了在不侵入 Windows 内核、不自写庞大 IKEv1 协议栈的前提下最快落地验证，当前版本采用了 **方案 A（WSL2 + strongSwan）**。
+
+### 3.1 架构与转发流程
 
 ```mermaid
 flowchart LR
-    app["Windows 应用<br/>(浏览器 / 客户端)"]
-    winroute["Windows 路由表<br/>SECURED-ROUTE → 指向 WSL 地址<br/>(需管理员权限)"]
+    app["Windows 应用<br/>(浏览器 / SSH / 终端)"]
+    winroute["Windows 路由表<br/>SECURED-ROUTE → 指向 WSL 宿主 IP<br/>(需要系统管理员权限)"]
     subgraph wsl["WSL2 发行版 v5vpn"]
         snat["iptables SNAT<br/>匹配目标网段，源地址 → 会话虚拟 IP"]
         charon["strongSwan / charon<br/>swanctl 配置（按会话重建）<br/>本地监听 UDP 1194"]
-        xfrm["XFRM / ESP<br/>aes192-sha1"]
+        xfrm["Linux 内核 XFRM / ESP<br/>aes192-sha1 加密封装"]
     end
     gw["V5VPN 网关<br/>IKEv1 主模式 + PSK"]
-    res["内网资源<br/>(SECURED-ROUTE 网段)"]
+    res["内网资源<br/>(SECURED-ROUTE 目标服务器)"]
 
-    app -->|"访问 203.0.113.10"| winroute
-    winroute --> snat
-    snat --> xfrm
-    xfrm -->|"ESP，NAT-T 浮动 UDP 4500"| gw
-    charon -.->|"控制面：IKEv1 主模式<br/>本地 1194 → 远端 1194<br/>身份 keyid:&lt;SESSION id&gt;"| gw
-    gw --> res
+    app -->|"1. 访问内网 198.51.100.10"| winroute
+    winroute -->|"2. 跨 Hyper-V 虚拟网络转发"| snat
+    snat -->|"3. 替换源 IP 后命中 SP 策略"| xfrm
+    xfrm -->|"4. ESP 密文 (UDP 4500 NAT-T)"| gw
+    charon -.->|"控制面：IKEv1 主模式握手<br/>本地 1194 → 远端 1194"| gw
+    gw -->|"5. 解密并投递"| res
 ```
 
-实线是用户数据的路径（Windows 路由 → WSL SNAT → ESP），虚线是 IKE 控制面。Go 侧不在这张图里——`internal/ipsec` 的工作是**编排**：生成 swanctl 配置、拉起连接、加路由，见下面的时序：
+### 3.2 为什么必须做 iptables SNAT？（关键机制说明）
+很多人疑惑：流量既然已经通过 Windows 路由转发到了 WSL 内部，为什么不能直接发出去，必须加一条 `iptables SNAT` 规则？
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant SV as VPNService
-    participant IM as internal/ipsec (Manager)
-    participant WS as WSL2 / strongSwan
-    participant GW as 网关
+- **根本原因**：网关在 IKE 快速模式协商时下发的 Child SA 安全策略选择器（Traffic Selector）是：
+  $$\text{Local (VIP)/32} \iff \text{Remote 0.0.0.0/0}$$
+- 当 Windows 应用程序发起访问时，数据包跨过 Hyper-V 虚拟网卡到达 WSL，此时报文的**源 IP 是 Windows 在 WSL 子网中的宿主 IP**（如 `172.28.0.1`）；
+- Linux 内核 XFRM 安全策略（SP）严格校验源地址：只有源 IP 等于会话虚拟 IP（`VIP`，如 `10.70.0.5`）的包，内核才会触发 ESP 加密封装。源 IP 为 `172.28.0.1` 的报文无法命中 SA 策略，会被直接按明文路由转发或丢弃；
+- 因此，Go 客户端通过脚本在 WSL 的 `POSTROUTING` 链添加了 SNAT 规则：
+  ```bash
+  iptables -t nat -A POSTROUTING -d <SECURED-ROUTE> -m comment --comment v5vpn-ipsec -j SNAT --to-source <VIP>
+  ```
+  精准将发往内网目标网段的数据包源 IP 替换为会话 VIP，随后报文顺利命中 XFRM 策略完成加密投递。
 
-    Note over SV: loadResources 发现 NC_RESOURCE
-    SV->>SV: go startIPsec(ncs)<br/>FromNC(ncs) 生成数据面配置<br/>(PSK / 虚拟 IP / session id 每次登录都变)
-    SV->>SV: ipsecState = starting
-    IM->>WS: 检查 WSL 发行版可用性
-    alt WSL 不可用
-        SV->>SV: ipsecState = unavailable<br/>（界面提示跑 setup-ipsec-wsl.ps1）
-    else WSL 可用
-        IM->>WS: 同一脚本：写 /etc/swanctl/conf.d/v5vpn.conf、<br/>加虚拟 IP 与 SNAT、确保 charon 监听 1194
-        IM->>WS: swanctl --load-all && --initiate
-        WS->>GW: IKEv1 主模式（本地 1194 → 远端 1194，后浮动 4500）
-        GW-->>WS: IKE_SA ESTABLISHED
-        Note over WS,GW: 快速模式：Child SA 选择器<br/>VIP/32 === 0.0.0.0/0
-        GW-->>WS: CHILD_SA INSTALLED
-        IM-->>SV: Start 成功，返回 WSL 地址<br/>（拿不到地址则跳过 Windows 路由）
-        SV->>IM: AddRoutes（SECURED-ROUTE → WSL 地址）
-        alt 路由添加成功（管理员）
-            Note over SV: Windows 应用直达内网
-        else 返回 ErrNotElevated（非管理员）
-            Note over SV: 隧道照常建立，仅 WSL 内可达<br/>界面提示手动加路由
-        end
-        SV->>SV: ipsecState = up
-    end
-    Note over SV: 任一步失败 → ipsecState = error + ipsecError<br/>/api/status 暴露给界面；登出 → 清空并拆隧道
-```
+### 3.3 实网验证锁定的关键参数（勿随意改动）
 
-- `internal/ipsec`：从 NC 资源生成 swanctl 配置，启动/停止连接，管理路由与 SNAT。
-- `VPNService`：资源拉取成功后自动启动隧道，`/api/status` 暴露 `ipsecState` / `ipsecError`，界面显示状态条。
-- Windows 路由：把每个 `SECURED-ROUTE` 指向 WSL 地址；WSL 内把发往这些目标网段的数据包源地址 SNAT 为会话虚拟 IP，再交给 XFRM/ESP。添加 Windows 路由需要管理员权限；非管理员时隧道仍然建立，但只有 WSL 内可访问，界面会提示。
-
-### 2.1 实网验证到的关键参数（勿随意改动）
-
-| 项 | 值 | 说明 |
+| 参数项 | 实网协商结果 | 说明 |
 |:---|:---|:---|
-| IKE 版本/模式 | IKEv1 主模式 | 网关返回 `Exchange mode='main'` |
-| IKE 端口 | **本地 1194 → 远端 1194** | 从 500 发不会得到任何回应；这是最容易踩的坑 |
-| IKE 提案 | `aes192-sha1-modp1024` | 与网关协商结果一致 |
-| ESP 提案 | `aes192-sha1` | AES-CBC-192 / HMAC-SHA1-96 |
-| 客户端身份 | `keyid:<SESSION id>` | 会话 ID 每次登录变化 |
-| 虚拟 IP | `PRIVATE-IP` | 每次登录变化 |
-| Child SA 选择器 | `<VIP>/32 === 0.0.0.0/0` | 不是按 SECURED-ROUTE 逐条协商 |
-| NAT-T | UDP 4500 | 主模式后自动浮动到 4500 |
+| IKE 版本与模式 | IKEv1 主模式（Main Mode） | 网关固定下发 `Exchange mode='main'` |
+| 控制面握手端口 | **本地 UDP 1194 $\rightarrow$ 远端 UDP 1194** | 网关特殊要求；从 500 端口握手会被丢弃 |
+| IKE Phase 1 提案 | `aes192-sha1-modp1024` | 3DES/AES256 等均被网关拒绝 |
+| ESP Phase 2 提案 | `aes192-sha1` | AES-CBC-192 / HMAC-SHA1-96 |
+| 客户端 IKE 身份 | `keyid:<SESSION_ID>` | 会话 ID 每次登录动态变化 |
+| 虚拟内网 IP | `PRIVATE-IP` | 网关每次登录动态分配 |
+| Child SA 选择器 | `<VIP>/32 === 0.0.0.0/0` | 全网状单端选择器，非逐条路由协商 |
+| NAT-T 穿越 | 自动浮动到 UDP 4500 | 主模式第 5/6 报文完成后，后续转入 UDP 4500 封装 |
 
-验证结果：IKE_SA/CHILD_SA 均为 ESTABLISHED/INSTALLED；从 WSL 与 Windows 访问 `203.0.113.10:443`、`203.0.113.11:443` 均能建立连接，SA 双向计数正常增长。
+实测结果：IKE_SA 与 CHILD_SA 双向建立稳定，Windows 宿主机应用访问内网 Web 与端口完全正常，双向流量计数平稳增长。
 
-### 2.2 测试覆盖（无 WSL 也能验证的部分）
+### 3.4 部署要求、已知限制与无 WSL 时的降级策略
 
-mock 网关支持 `-nc` 夹具（`only` 替换 TCP/UDP 列表、`mixed` 并存，地址为 TEST-NET、PSK 为显式 mock 值），分四层守卫：
-
-| 层 | 位置 | 验什么 |
-|:---|:---|:---|
-| 协议解析 | `test/mock/v5vpn/nc_integration_test.go` | IKE/虚拟 IP/路由完整到达客户端；摘要 JSON 不含 PSK；`FromNC` 可生成数据面配置 |
-| service 状态机 | `internal/service/vpn_service_ipsec_test.go` | `ipsecState` 在 unavailable / up / error 间的迁移与清理（注入 fake Runner，不碰真实 WSL） |
-| UI 端到端 | `test/e2e_ui_test.js --scenario=v5vpn-nc` | 0 TCP/UDP 时资源表进入 NC 分支、状态条渲染、`/api/status` 摘要完整、PSK 不泄漏 |
-| 实网 | `internal/ipsec/live_test.go`（`IPSEC_PORTAL_XML` 启用） | 真实网关的 SA 建立 |
-
-无 WSL 的机器上，E2E 里 `ipsecState` 落到 `unavailable` 属预期——这验证的正是状态机与界面提示，而非隧道本身。
-
-一次性准备（管理员，需重启一次）：
-
+#### 1) 首次使用的一次性准备（需管理员 + 重启一次）
 ```powershell
-# 1) 启用 WSL 功能（DISM），重启
+# 1. 开启 WSL2 与虚拟机平台
 dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
 dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 
-# 2) 导入发行版并安装 strongSwan
+# 2. 导入内置 strongSwan 的 Ubuntu 发行版
 .\scripts\setup-ipsec-wsl.ps1 -RootFS C:\wsl\ubuntu-base-24.04.tar.gz
 ```
 
-之后每次登录：客户端写入 `/etc/swanctl/conf.d/v5vpn.conf`，确保 charon 监听 1194，`swanctl --load-all` + `--initiate`，再添加 SNAT 与 Windows 路由。
+#### 2) 如果 Windows 用户没有安装 WSL，会发生什么？
+- **非 NC 资源完全不受影响**：单端口应用资源和网页 PAC 代理完全由宿主机用户态进程处理，**不需要管理员权限，不需要 WSL，零驱动，登录后即刻可用**；
+- **NC 资源独立降级**：客户端登录后异步检测 WSL 发行版，若检测失败，`ipsecState` 标记为 `unavailable`，前端资源列表正常渲染，并在连接页顶部显示警示条（提示运行环境准备脚本），**绝对不会引起客户端崩溃或阻断其它已连接的业务**；
+- **用户的选择**：
+  1. 运行一次初始化脚本安装 WSL2；
+  2. 若因安全管控无法开启 WSL2，联系管理员将该账号的策略由全网状 NC 调整为具体的 TCP/UDP 应用端口映射。
 
-已知限制：
+#### 3) 已知限制
+- **必须以管理员身份运行客户端**：向 Windows 路由表执行 `route.exe add` 必须提权，非管理员时隧道虽然能在 WSL 内部建起，但宿主机应用流量无法流入；
+- **异常退出残留**：若客户端被任务管理器强制杀死，WSL 内的 iptables SNAT 规则与 Windows 路由表条目无法触发 `Stop()` 清理，需在重连时覆盖或手动排查。
 
-- Windows 路由需要客户端以管理员运行；否则只能在 WSL 内访问内网。
-- 每次登录的 PSK / 虚拟 IP / session id 都会变化，配置按会话重建。
-- 会话被强制结束（直接杀进程）时不会执行清理；重新登录会覆盖配置，但旧的 SNAT 规则需要 `iptables -t nat -S POSTROUTING` 手动核对。
+---
 
-### 2.3 无 WSL 环境时的表现与降级策略
+## 4. 怎么彻底解决问题？有哪几种方案与评估？
 
-如果 Windows 用户机器上未安装 WSL 或未导入 `v5vpn` 发行版：
+虽然方案 A（WSL2）成功跑通了 Windows 上的实网流量，但它的缺陷十分明显：**需要安装庞大的 WSL2 虚拟机，需要重启电脑，且无法覆盖 macOS 和 Linux**。为此，我们需要评估更彻底的解法。
 
-- **登录与非 NC 资源零影响**：
-  - TCP/UDP 单端口映射（L4 本地转发）与网页/端口区间资源（本地回环 CONNECT 代理 + 系统 PAC）完全由宿主机 Go 进程在用户态承载，不依赖任何虚拟网卡、内核驱动或 WSL，也不需要管理员特权，登录后完全正常可用。
-- **NC 资源独立降级**：
-  - 登录成功并解析出 `NC_RESOURCE` 后，后台异步探测 WSL 发行版可用性；
-  - 若未检测到 WSL，`ipsecState` 状态机落到 `unavailable`，前端资源列表仍正常展示，连接页顶部状态条给出明确提示（「未检测到 WSL 环境，请运行配置脚本」）；
-  - 隧道拉起失败不会阻断用户登录流程，亦不会影响其它已连接的代理端口。
-- **用户的处置选择**：
-  1. **一次性配置 WSL**：以管理员身份运行 `scripts/setup-ipsec-wsl.ps1`（启用 WSL 与虚拟机平台特性、导入内置 strongSwan 的 Ubuntu rootfs，需重启系统一次）；
-  2. **网关改配应用资源**：若受限于公司 IT 策略无法开启 Hyper-V / WSL2，可联系网关管理员将该账号的权限从全网状 NC 资源变更为具体的 TCP/UDP 应用端口资源，即可彻底免除 WSL 依赖与提权需求。
+### 方案 A'：Linux 宿主机原生 strongSwan（低成本单平台扩展）
+- **解决思路**：Linux 宿主机自带 XFRM 与 Netfilter，宿主机直接运行 `strongSwan (charon)`。Go 客户端的编排代码（配置生成、`swanctl` 加载、`iptables` SNAT）与方案 A 完全同构，只需去掉 `wsl.exe` 调用。
+- **代价与权衡**：
+  - 优点：Linux 上无需虚拟机，性能优异，开发成本极低（数人天即可接入）；
+  - 缺点：强依赖宿主机系统包管理器安装 strongSwan（非单二进制自包含），且操作 XFRM 和路由仍需宿主机 `root` / `CAP_NET_ADMIN` 特权。
 
-## 3. 其他实现路径（备选）
+### 为什么 strongSwan 自身无法实现桌面三平台统一？
+很多工程师会问：“既然 Linux 和 Windows 都能借 strongSwan 跑通，macOS 为什么不能也跑 strongSwan，从而实现统一？”
 
-### A. 当前方案（WSL2 + strongSwan）
+**答案是：macOS 走不通，strongSwan 自身无法在桌面三平台实现统一。**
 
-见上。优点：复用成熟的 IKEv1/ESP 实现；缺点：依赖 WSL2 和管理员权限。
+1. **协议断层硬伤**：macOS 官方在系统级网络框架 `NetworkExtension` 中**仅支持现代 IKEv2**，早已废弃老旧的 IKEv1 主模式。strongSwan 官方发布的 macOS 客户端是基于 NetworkExtension 开发的，连上该网关直接报协议不支持。
+2. **内核后端缺失与移植代价**：
+   - Linux 依靠内核 XFRM，FreeBSD 依靠 `PF_KEY`；macOS 既没有 XFRM 也不开放 raw PF_KEY；
+   - 若要在 macOS 上运行传统 strongSwan 守护进程，必须使用其 `kernel-libipsec` 插件（一个用户态 ESP 加解密实现），并通过代码将其桥接到 macOS 原生的 `/dev/utun` 网卡；
+   - **代价严重倒挂**：这一套工作量等同于自行编写用户态 TUN 驱动，而且还要额外背负 strongSwan 庞大的 C 语言依赖、跨平台交叉编译与数十兆动态库的分发包袱，得不偿失。
 
-### A'. Linux 宿主机原生 strongSwan（单平台低成本扩展）
+### 方案 B：纯 Go 用户态自实现 IPsec（终极演进形态）
+- **解决思路**：参考通用纯用户态 VPN 架构（如 WireGuard-go 等），由 Go 客户端在用户态全自研实现 IKEv1 主模式状态机 + ESP 加解密（UDP 4500 封装），并借助成熟的通用虚拟网卡驱动（Windows 下的 `wintun`、macOS 原生的 `/dev/utun`、Linux 原生的 `/dev/net/tun`）完成三层数据包收发。
 
-Linux 内核原生自带 XFRM（IPsec 协议栈）与 Netfilter，宿主机可直接运行 strongSwan 守护进程（charon），完全不需要 WSL 这层虚拟机开销：
+#### 1) 特权边界辨析：为什么特权无法消除？
+有人误以为：“用纯 Go 用户态自实现 IPsec 后，是不是就不需要系统管理员权限了？”
 
-- **原理与优势**：Go 侧编排逻辑（`swanctl.conf` 配置生成、`iptables` SNAT、路由管理）与 Windows WSL 方案完全同构，仅需去掉 `wsl.exe` 调用；工作量相比从零自写协议栈小一个数量级。
-- **代价与局限**：依赖系统包管理器安装 strongSwan（非单二进制自包含），且添加路由与操作 XFRM/iptables 仍需宿主系统的 `root` 或 `CAP_NET_ADMIN` 特权。当前客户端未接管宿主 strongSwan，主要是因 `internal/ipsec/manager.go` 仍以 Windows 桌面为主、硬编码了 WSL 调用。
+**答案是：依然必须特权。B 路线摆脱的是 WSL2 虚拟机的笨重依赖，而不是提权需求。**
 
-### B. 用户态自实现（wintun / utun / XFRM）
+特权的来源不是 IPsec 协议本身（IKE 是普通 UDP 报文通信，ESP 是纯 CPU 内存计算，零特权），而是**操作系统对三层网络接管的安全底线**：
+1. **创建/打开 TUN 网卡**：Windows 打开 Wintun 必须管理员权限，macOS 打开 `/dev/utun` 和 Linux 打开 `/dev/net/tun` 必须 `root` / `CAP_NET_ADMIN`；
+2. **修改系统路由表**：向操作系统核心路由表中添加 `198.51.100.0/24` 的指向条目，全平台都必须管理员权限。
 
-可行性：**技术成立，属于工程量大但路径已知的问题**。依据有三：wireguard-go 证明 Go 用户态 VPN 数据面可在三平台承载；strongSwan libipsec 证明 IKE/ESP 可脱离内核；最重要的是 §2.1 已实网锁定全部互操作参数——IKE 自实现最怕的「对端网关认什么」（提案、模式、端口怪癖）已不是未知数，本路线是照着已知答案写，不是探索。难点清单：
+#### 2) 产品化解法：Privileged Helper 架构
+为了避免用户每次点击连接都弹出 Windows UAC 提权窗或要求输入 `sudo` 密码，成熟做法是采用 **Privileged Helper** 架构（系统后台服务守护进程）：
+- 客户端在首次安装或首次初始化时，申请一次特权，向操作系统注册一个常驻轻量后台服务（Windows Service / macOS LaunchDaemon / Linux systemd）；
+- 日常前台 GUI 客户端以普通低权限用户运行；
+- 登录成功拿到 NC 路由后，前台通过本地 RPC/IPC 通知 Helper 执行 TUN 设备创建与路由注入，达成日常运行**零弹窗、零中断**。
 
-| 难点 | 内容 | 评估 |
+#### 3) 其他网络软件开启 TUN 模式时的排查与强提醒机制
+在三层网络方案落地与日常使用中，必须建立明确的防冲突提醒：
+- **单机三层网络互斥底线**：访问政企内网三层资源时，严禁同时开启其他全局接管类网络软件；要访问内网就不要同时进行其他全局网络分流操作；
+- **主动诊断与强提醒**：
+  - 隧道建立后，客户端若探测到内网网段连通性异常，或检测到系统存在多个活动中的虚拟网卡，界面必须弹出强提醒：
+    > **⚠️ 网络冲突提示**：检测到系统中可能存在其他正在运行的 TUN 模式网络软件，内网流量已被其强行接管劫持。**要访问内网资源，请务必先彻底退出或关闭其他软件的 TUN 模式**，否则内网无法正常使用。
+
+#### 4) 方案 B 带来的变动代价与难点评估
+| 难点 | 内容说明 | 变动代价与评估 |
 |:---|:---|:---|
-| IKEv1 全栈 | 主模式 6 报文 + PSK 认证 + 快速模式 + DPD + 重协商 + NAT-T | **大头，数千行级**；Go 无生产级现成库，基本手写 |
-| ESP 数据面 | 序列号 + 抗重放窗口 + AES-CBC-192 + HMAC-SHA1-96 + UDP 4500 封装 | 性能无忧（AES-NI），烦在细节正确性 |
-| TUN 层 | wintun / utun / TUN 三套平台 API | 各平台百行级绑定，自写可行；wireguard-go 的 tun 包是 GPLv2，复用有传染性，视项目许可取舍 |
-| 特权 helper | Windows 服务 / launchd / systemd + IPC 权限校验 | **被低估的一半工程**：写坏即本地提权漏洞 |
-| 测试裁判 | mock 网关只有 REST 层，无 IKE/ESP 服务端 | 按「mock 是裁判」约定，动工前需先给 mock 实现 IKEv1 |
-| 端口冲突 | 本地 1194 是网关怪癖要求 | A 绑在 WSL 独立网络栈里宿主不占；B 直接 bind 宿主端口，与原厂客户端同跑会竞争 |
-| 并发竞态 | IKE 状态机 × TUN 读循环 × 重协商定时器 × 登出清 SA | 锁设计先行，`-race` 全覆盖 |
-| 长尾 | NAT keepalive、DPD 超时、SA 过期重协商、崩溃恢复 | 上线后的主要维护成本 |
+| **IKEv1 协议栈全自研** | 主模式 6 报文协商 + PSK 计算 + 快速模式 Child SA + DPD + NAT-T | **工程量巨大**：Go 无成熟可靠的开源 IKEv1 库，需手工编写数千行状态机代码 |
+| **密码学安全性责任转移** | SA 密钥派生、抗重放攻击滑动窗口、CBC/HMAC 边界对齐 | **维护风险高**：strongSwan 有二十年的实网加固检验，自研状态机若存在死锁或漏洞即直接暴露安全隐患 |
+| **测试裁判重构** | 本项目严格遵循「mock 网关是裁判」原则，当前 mock 只有 HTTP 层 | **必须先开发 mock IKEv1 服务端**，裁判先行才能保证自研协议栈的可测性 |
+| **TUN 层跨平台绑定** | Windows `wintun` / macOS `utun` / Linux `tun` 三套适配 | 代码量适中（数百行），可复用成熟规范 |
+| **特权 Helper 守护进程** | 跨平台系统服务注册 + 本地安全 IPC 校验 | 需编写 Windows Service 和 Unix Daemon 代码，避免 IPC 成为本地提权漏洞 |
 
-一个重要缓解：**本实现是单对端专用，不是通用 IPsec 客户端**——只需复刻网御网关认的那一组参数（§2.1 已全部锁定），无需实现 IKEv1 全集的提案组合与兼容分支，工作量比「通用」砍掉一大截。同样要划清两个 **不是问题**：性能（AES-NI 下用户态每包处理对 VPN 量级绰绰有余，Linux XFRM 变体还可把 ESP 留内核）与互操作（参数已实网锁定）。
+### 方案 C：复用原厂 32 位 DLL 引擎（临时验证）
+- **解决思路**：通过 32 位辅助进程加载原厂客户端的专有动态库，借其驱动完成握手。
+- **评价**：依赖本机已安装的原厂客户端和内核驱动，根本无法作为独立分发的开源客户端，仅可作为逆向分析的对照工具，不可作为长期方案。
 
-对应的两个长期代价：
+---
 
-- **密码学正确性责任转移**：A 路线的 SA 协商与抗重放是 strongSwan 二十年 hardened 的实现；B 路线这些全在自己手里，一个状态机 bug 就是 CVE。Go 的加密原语安全，但协议组合的安全性自己负责。
-- **Windows 过渡期双数据面**：A 已实网落地，B 渐进上线的合理次序是先补 Linux/macOS（A 够不到的平台），Windows 保留 WSL——过渡期内两套数据面并存维护。
+## 5. 方案对比总览与决策结论
 
-落地次序（把双数据面过渡期缩到最短）：
+### 5.1 全方案横向对比表
 
-1. **mock 先行**：给 `test/mock/v5vpn` 实现 IKEv1 服务端——裁判先立、实现后对，这是 B 的第一块里程碑；
-2. IKE/ESP 核心按 §2.1 参数实现，单测 + 对 mock 互测；
-3. B 先上 Linux/macOS（A 够不到的平台，无迁移成本）；
-4. Windows 最后切到 wintun、A 退役，双数据面合流。
+| 方案 | 跨平台覆盖度 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核安全影响 | 其他 TUN 软件冲突时的表现与要求 | 综合定位与评估 |
+|:---|:---|:---|:---|:---|:---|:---|
+| **方案 A：WSL2 + strongSwan**<br/>*(当前实网落地方案)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu 镜像、strongSwan | 运行时需系统管理员权限（注入 Windows 路由） | 宿主机零专有驱动；流量经 Hyper-V 进入 WSL 内核 XFRM | 路由若被其他 TUN 软件覆盖，内网彻底失联；**必须提示关闭其他 TUN** | **当前最优落地**：复用成熟工业级协议栈，稳定可用；缺点是环境笨重、需重启 |
+| **方案 A'：宿主机 strongSwan**<br/>*(单平台快速扩展)* | 仅 Linux | 依赖 Linux 发行版包管理器安装 strongSwan 软件包 | 需系统 `root` 或 `CAP_NET_ADMIN` | 宿主机零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | 与系统分流策略相关；可借助 Linux 策略路由（ip rule）隔离 | **Linux 最佳低成本捷径**：免虚拟机，编排同构，开发成本低，但无法实现单二进制分发 |
+| **方案 B：纯 Go 用户态 IPsec**<br/>*(长期演进目标)* | **Windows / macOS / Linux 三平台统一** | **零外部依赖**<br/>（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 引入通用轻量 `wintun.sys`（微软签名）；macOS/Linux 使用原生系统 TUN | 同样受三层路由抢占影响；需在客户端内置强提醒关闭其他 TUN | **终极架构形态**：真正跨平台自包含、无残留、免外部依赖；缺点是开发量数人月级，需承担密码学维护责任 |
+| **方案 C：原厂 DLL 注入**<br/>*(本地过渡测试)* | 仅 Windows | 强依赖已安装的原厂客户端文件及运行环境 | 依原厂要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`），驱动冲突依然存在 | 与原厂客户端冲突表现一致 | 仅作内部对照调试，不可分发 |
 
-必须先说清的一个边界：
+### 5.2 决策结论
 
-- **「零内核驱动」表述需精化**：Windows 的 wintun 本质是驱动（`wintun.sys`，微软签名、WireGuard 维护的通用驱动，与厂商 TAP 不冲突，驱动冲突痛点不会回来）；macOS utun / Linux TUN 是内核原生接口。`vendor-landscape.md` 的「不加载内核驱动」在 B 落地后应读作「不加载**厂商私有**驱动」。
-
-#### 为什么特权无法避免（B 路线摆脱的是 WSL2，不是提权）
-
-一个常见的架构疑问是：「既然做成了纯 Go 用户态 IPsec，是不是就能免管理员权限运行了？」
-
-**答案是：不能。全平台三层网络接管都必须系统特权。**
-
-特权的来源不是 IPsec 协议本身（IKE 是普通 UDP 报文通信，ESP 加解密是 CPU 用户态运算，两者均为普通用户态逻辑，零特权），而是操作系统对**三层网络接管的安全防线**：
-
-1. **创建/打开 TUN 虚拟网卡设备**：
-   - Windows：调用 Wintun API 创建适配器需要系统管理员权限；
-   - macOS：创建 utun 接口（PF_SYSTEM 控制套接字）需要 `root` 权限；
-   - Linux：打开 `/dev/net/tun` 需要 `root` 或 `CAP_NET_ADMIN`。
-2. **系统路由表注入**：
-   - 将内网网段（`SECURED-ROUTE`，如 `10.0.0.0/8`）指向 TUN 适配器，全平台修改系统路由表均属于内核级特权操作。
-
-因此，**B 路线解决的是摆脱 WSL2 笨重依赖与实现三平台单一二进制，而不是消除特权需求**（A 路线修改 Windows 路由同样需要管理员权限，二者在特权要求上打平）。
-
-各平台承载的特权形态速查：
-
-| 平台 | 承载 | 特权点 | 用户感知 |
-|:---|:---|:---|:---|
-| Linux | 原生 strongSwan（A'） | XFRM 注入、路由 | 最优雅：strongSwan 即特权系统服务，装包 sudo 一次，运行时 app 经 VICI socket 免提权 |
-| Windows | WSL2（A）/ wintun（B） | 装 WSL、改路由 / 建适配器 | 现状为运行时管理员（`route.exe add`），WSL 内 root 用户无感 |
-| macOS | utun（B） | 建适配器、改路由 | 最重：无免提权形态，需一次性 launchd helper 或每次 sudo |
-
-产品化解法是 Tailscale 模式：安装时一次性装 privileged helper（Windows 服务 / launchd daemon / systemd unit），app 本身保持非特权，经 IPC 委托特权操作。另有一个零特权降级形态：NC 资源走本地 socks 代理 + 用户态 ESP（应用手动配代理，同单端口资源的哲学），代价是失去全网状透明路由。
-
-B 落地后的平台承载——即「全平台 NC 资源可达吗」的答案（数据面层面：是）：
-
-| 平台 | 承载 | 需要什么 | 相对 A 的收益 |
-|:---|:---|:---|:---|
-| Windows | wintun + 用户态 ESP | 管理员（或一次性 helper） | 免装 WSL2、免重启 |
-| macOS | utun + 用户态 ESP | root（或一次性 helper） | 从「仅展示」变可达 |
-| Linux | TUN + 用户态 ESP；或直接 XFRM（ESP 留内核，用户态只写 IKE） | CAP_NET_ADMIN | 从「仅展示」变可达；XFRM 变体工作量减半 |
-
-但 B **不是全平台 NC 的唯一路径**：Linux 上最便宜的是主机原生 strongSwan（XFRM 内核 ESP，编排代码与 A 完全同构，只是不用 WSL），工作量小一个数量级，代价是依赖系统包管理器、不自包含。
-
-#### 为什么 strongSwan 自身无法达成三平台统一？
-
-既然 Linux 原生 strongSwan 表现良好、Windows 可借道 WSL，能否直接让 strongSwan 覆盖 macOS，从而实现三平台统一？
-
-**结论是：无法在 macOS 走通，strongSwan 自身无法实现桌面三平台统一。**
-
-- **macOS 的协议版本断层（致命硬伤）**：
-  - 本网关强制要求 **IKEv1 主模式 (Main Mode) + PSK**；
-  - macOS 现代系统级网络框架（NetworkExtension）**仅支持 IKEv2**，根本无法协商老旧的 IKEv1 主模式；
-  - strongSwan 官方针对 macOS 开发的 GUI 客户端也是基于 Apple NetworkExtension 框架构建的，因此连上该网关在协议层就直接被拒。
-- **桌面 charon 移植成本过高**：
-  - macOS 既没有 Linux 的内核 XFRM，也不开放 raw PF_KEY 接口；
-  - 若想在 macOS 运行 strongSwan 传统的 `charon` 守护进程，必须自行把 `kernel-libipsec` 移植桥接到 macOS 的 utun 接口；
-  - 该 TUN 适配工作量与自写用户态 ESP（B 路线）几乎完全重叠，且项目还需额外背负 strongSwan 复杂的 C 语言跨平台交叉编译与动态库打包分发负担。
-- **统一维度的差异**：
-  - strongSwan 路线（A/A'）的「统一」仅停留在 Go 编排层的 swanctl 脚本同构，底层运行时在各平台完全割裂（Windows 依赖 WSL2、Linux 依赖系统 apt/dnf 包、macOS 不可用）；
-  - 只有纯 Go 用户态 IPsec（B 路线）才能做到**二进制级别的真统一**（单二进制无外部运行时、自包含、消除退出残留）。
-
-### C. 复用原厂 IPsec 栈
-
-- 通过 32 位辅助进程加载原厂 DLL 并驱动其 IPsec 引擎。
-- 依赖已安装的原厂客户端，不能随项目分发，跨机器不可用；仅适合本机临时方案。
-
-### D. 方案对比总览
-
-| 方案 | 跨平台覆盖 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核影响 | 优缺点与定位 |
-|:---|:---|:---|:---|:---|:---|
-| **A. WSL2 + strongSwan**<br/>*(当前实网落地)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu rootfs、strongSwan | 运行时需管理员（注入 Windows 路由；WSL 内部免感） | 零宿主驱动；流量经 Hyper-V 虚拟网络进入 WSL 内核 XFRM | **现状方案**：复用成熟 IKEv1 栈落地最快；缺点是安装包大、需启用 WSL 并重启一次 |
-| **A'. 宿主机 strongSwan**<br/>*(单平台扩展)* | 仅 Linux | 依赖系统包管理器安装 strongSwan 软件包 | 需 `root` 或 `CAP_NET_ADMIN`（XFRM/路由） | 零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | **Linux 最佳捷径**：免虚拟机、编排同构；缺点是无法自包含、依赖宿主环境 |
-| **B. 纯 Go 用户态 IPsec**<br/>*(长期演进目标)* | Windows / macOS / Linux **三平台统一** | **零外部依赖**（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 需通用 `wintun.sys`（无厂商冲突）；macOS/Linux 使用系统原生 TUN | **终极形态**：全平台同构、真自包含；缺点是工程量大（手写 IKEv1/ESP、Privileged Helper） |
-| **C. 原厂 DLL 注入**<br/>*(本机临时方案)* | 仅 Windows | 强依赖本机已安装的原厂 32 位客户端及相关 DLL | 依原厂权限要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`） | 仅能作为逆向测试或本机过渡验证，不可分发 |
-
-## 4. 结论
-
-- **现状落地（A 路线）**：Windows 上 NC 账号通过 WSL2 + strongSwan 承载，已实网验证通过（管理员一次性配置 WSL2 + strongSwan，接受一次重启）。
-- **无 WSL / 非 Windows 环境的表现**：
-  - TCP/UDP 单端口映射与网页/区间 PAC 代理全平台可用，零驱动、零特权、零 WSL 依赖；
-  - NC 资源降级为 `unavailable` 并给出提示，用户可选择跑脚本安装 WSL，或由管理员改配为应用资源。
-- **跨平台可行性定性**：
-  - Linux 宿主机原生 strongSwan（A' 路线）低成本可行；
-  - macOS 受限于系统 NetworkExtension 仅支持 IKEv2 以及缺少 XFRM/PF_KEY，无法复用 strongSwan；
-  - strongSwan 自身无法达成桌面三平台统一。
-- **长期形态（B 路线）**：
-  - 纯 Go 用户态 IPsec（wintun / utun / TUN）是达成三平台统一单二进制的唯一自包含路径；
-  - 三层网络接管决定了全平台均无法免除系统管理员特权，产品化方向采用 Privileged Helper 模式。
+1. **现状保证可用性**：Windows 端维持当前 **方案 A（WSL2 + strongSwan）** 不动，实网已验证其可靠性；对于未安装 WSL 的用户，保持非 NC 资源完全正常运行，NC 资源优雅降级并给出安装提示。
+2. **其他 TUN 软件冲突强提醒**：明确「要访问内网就不能同时开启其他 TUN 软件」的互斥原则。在客户端 UI 增加明显的排查指引与强提醒，内网连不上时明确提示用户关闭其他网络工具的 TUN 模式。
+3. **Linux 优先采纳 A' 路线**：若需快速支持 Linux 桌面与国产信创系统，优先实现原生 Linux strongSwan 编排（A'），以极小代价补齐 Linux NC 能力。
+4. **长期演进锁定 B 路线**：纯 Go 用户态 IPsec（B）是实现 Windows / macOS / Linux 三平台统一、单二进制自包含分发的唯一路径。演进应遵循 **「mock 裁判先行 $\rightarrow$ 自研 IKEv1/ESP $\rightarrow$ Privileged Helper 落地 $\rightarrow$ 多 TUN 冲突防御」** 的稳健路径分步实施。
