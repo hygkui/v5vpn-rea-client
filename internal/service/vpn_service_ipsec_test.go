@@ -77,10 +77,10 @@ func newIPsecTestService(t *testing.T, runner ipsec.CommandRunner) *VPNService {
 
 	s := NewVPNService(nil)
 	s.Status = "Connected"
-	s.newIPsecManager = func(confPath string) *ipsec.Manager {
+	s.newIPsecBackend = func(confPath, _ string) ipsec.TunnelBackend {
 		m := ipsec.NewManager(confPath)
 		m.Runner = runner
-		return m
+		return ipsec.NewWindowsBackend(m, fakeWindowsRoutes{})
 	}
 	return s
 }
@@ -333,3 +333,8 @@ func TestCleanupStaleSessionStopsIPsecAndWebProxies(t *testing.T) {
 		t.Errorf("cleanupStaleSessionLocked 必须停止 IPsec 隧道下发 terminate, calls: %v", runner.getCalls())
 	}
 }
+
+type fakeWindowsRoutes struct{}
+
+func (fakeWindowsRoutes) Add(context.Context, []string, string) error    { return ipsec.ErrNotElevated }
+func (fakeWindowsRoutes) Remove(context.Context, []string, string) error { return nil }

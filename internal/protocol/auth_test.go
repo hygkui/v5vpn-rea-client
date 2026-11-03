@@ -28,7 +28,17 @@ func TestClassifyAuth(t *testing.T) {
 		{"", "用户名或密码错误", AuthKindOther},
 		{"not-a-code", "用户名或密码错误", AuthKindOther},
 		{"0x66600011", "请输入验证码", AuthKindVerifyCode},
+		// 0x80000050：生产网关实抓的「验证码不能为空」拒绝码。
+		{"0x80000050", "验证码不能为空", AuthKindVerifyCode},
 		{"0x80000013", "用户被锁定", AuthKindOther},
+		// 野外网关对空验证码回未收录码值、msg 只有一句「验证码不能为空」：
+		// 文案兜底必须把它归成验证码挑战，否则界面永远不弹验证码模态。
+		{"0x1000000C", "验证码不能为空", AuthKindVerifyCode},
+		{"", "验证码不能为空", AuthKindVerifyCode},
+		{"not-a-code", "图形验证码错误，请重新输入", AuthKindVerifyCode},
+		// 短信与动态令牌的文案同样含「验证码」，兜底不得把它抢成图形码。
+		{"", "短信验证码错误", AuthKindOther},
+		{"", "动态令牌验证码错误", AuthKindOther},
 	}
 	for _, tc := range cases {
 		if got := classifyAuth(tc.code, tc.msg); got != tc.kind {

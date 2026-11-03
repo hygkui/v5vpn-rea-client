@@ -26,12 +26,13 @@ const ikePort = 1194
 // Config is the runtime profile for one NC session. Every login returns new
 // values (session id, virtual IP, PSK), so it is built per session.
 type Config struct {
-	Server     string   // gateway IKE address
-	ServerPort int      // gateway IKE port (the portal reports a non-default one)
-	ClientID   string   // session id, sent as a KEY_ID identity
-	PSK        string   // gateway pre-shared key
-	VirtualIP  string   // internal address assigned to this session
-	Routes     []string // CIDR subnets protected by the tunnel
+	PeerAddress string   `json:"peerAddress,omitempty"` // Private helper transport; never changes the IKE identity.
+	Server      string   // gateway IKE address
+	ServerPort  int      // gateway IKE port (the portal reports a non-default one)
+	ClientID    string   // session id, sent as a KEY_ID identity
+	PSK         string   // gateway pre-shared key
+	VirtualIP   string   // internal address assigned to this session
+	Routes      []string // CIDR subnets protected by the tunnel
 }
 
 // FromNC builds the runtime config from the portal's first NC resource.
@@ -46,6 +47,9 @@ func FromNC(list []protocol.NCResource) (*Config, error) {
 	}
 
 	nc := list[0]
+	if (nc.IKE.Version != "" && nc.IKE.Version != "v1") || (nc.IKE.Exchange.Mode != "" && nc.IKE.Exchange.Mode != "main") || (nc.IKE.Client.IDType != "" && nc.IKE.Client.IDType != "key_id") {
+		return nil, fmt.Errorf("暂不支持该 NC 协商方式（需要 IKEv1 Main Mode / key_id）")
+	}
 	cfg := &Config{
 		Server:     strings.TrimSpace(nc.IKE.Server.IP),
 		ServerPort: nc.IKE.Server.Port,

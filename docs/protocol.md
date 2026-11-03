@@ -91,3 +91,33 @@ sequenceDiagram
    - 建立 SSL 连接并发送 `CONNECT {TargetIP}:{TargetPort} HTTP/1.1\r\nCookie: VSG_SESSIONID={SessionID}` 进行全双工透传。
 6. **保活心跳**：`GET /vpn/user/portal/intergration.xml?period={interval}&version=2.0`。
 7. **安全登出**：`GET /vpn/user/logout`。
+
+## 3. Cookie 线上格式：含逗号的 VSG_SESSIONID（2026-11-02）
+
+**现象**：登录成功后拉取 `intergration.xml` 与心跳全部 30 秒超时，且仅当本次
+`VSG_SESSIONID` 含逗号（如实测值 `aabbccdd,eeff,gghhii`）时发生。无 cookie 或
+假 cookie 的请求网关 27ms 内即回结果码，端点本身正常。
+
+**根因（实测证据）**：Go 标准库 `http.Request.AddCookie` 按 RFC 6265 给含逗号
+的值包一层双引号再发送（`Cookie: VSG_SESSIONID="a,b,c"`）；原厂 Windows 客户端
+发送裸值。该网关门户（Java）不解析引号：带引号的会话查询不回应——35 秒 0 字节；
+裸值 28ms 返回完整 `intergration.xml`。会话本身有效，问题纯粹是线上格式。
+
+**反面案例（两处 mock 盲区）**：mock 网关用 Go 解析 Cookie，收到带引号的值会
+自动去引号，永远暴露不了该差异——mock 是宽松裁判，线上格式必须由传输层守卫测试
+断言（`TestLoginSendsUnquotedCommaSessionCookie`）。另外 Go 1.27 的 cookiejar
+对带引号的 `Set-Cookie` 会**整个丢弃**该 cookie，而服务端 `http.SetCookie` 恰好
+会给含逗号值加引号——复现该网关行为的服务端测试必须写原始
+`Set-Cookie` 头（裸值），不能用 `http.SetCookie`。
+
+**决策**：在 `NewClient` 的 Transport 外加 `cookieFixTransport`
+（[`cookie_transport.go`](../internal/protocol/cookie_transport.go)），发送前把
+"含逗号且被 Go 加引号"的 cookie 值还原为裸值，覆盖登录、取资源、心跳、登出全部
+请求。不改 cookiejar 或单个调用点：jar 返回的值经 `AddCookie` 每次都会被重新
+加引号，只有线上格式这层拦得住。代理层（`internal/proxy`）自行拼裸值 Cookie，
+本就不经过该路径。插入包装层后，装/清客户端证书对 `*http.Transport` 的依赖改经
+`transportOf` 解包，mTLS 因子行为不变（守卫
+`TestTransportOfUnwrapsCookieFixTransport`、`TestClearTLSClientCertificateRemovesInstalledCert`）。
+
+**头部改写规则**：只撤"带引号且内部含逗号"的值（Go 只有这两种特征会加引号），
+其余形态原样保留，见 `TestUnquoteCookieHeaderStripsOnlyCommaQuotedValues`。

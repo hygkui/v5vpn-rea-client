@@ -18,7 +18,8 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 // goBuild 构建一个仓库内包到指定路径。
 function goBuild(tag, outPath, pkg) {
   tag(`构建 ${pkg} → ${outPath}`);
-  execFileSync('go', ['build', '-o', outPath, pkg], {
+  const buildTags = process.platform === 'linux' && pkg.endsWith('/internal/cmd') ? ['-tags', 'ipsectest'] : [];
+  execFileSync('go', ['build', ...buildTags, '-o', outPath, pkg], {
     cwd: REPO_ROOT,
     stdio: 'inherit',
     env: { ...process.env },
@@ -110,8 +111,14 @@ async function startSandbox(spec) {
   //    候选路径读到开发机真实配置。
   const appPort = await findFreePort();
   const appEnv = { ...process.env, APPDATA: appDataDir };
+  if (process.platform === 'linux') appEnv.V5VPN_IPSEC_TEST_STATE = process.env.V5VPN_E2E_IPSEC_STATE || 'up';
   if (process.platform !== 'win32') {
     appEnv.HOME = appDataDir;
+    // os.UserConfigDir 优先读 XDG_CONFIG_HOME，仅重定向 HOME 挡不住它：
+    // 深度/Ubuntu 等发行版把它设成全局的 $HOME/.config，开发机真实的
+    // setting.xml（真实网关与账号）会漏进沙盒——下拉里出现真实网关、
+    // 演示网关不再注入，E2E 断言随之失败。
+    appEnv.XDG_CONFIG_HOME = path.join(appDataDir, '.config');
   }
   const appProc = spawn(appExe, ['-port', String(appPort)], {
     stdio: ['ignore', 'pipe', 'pipe'],

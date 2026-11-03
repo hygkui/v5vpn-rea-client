@@ -39,6 +39,12 @@ const SUITES = [
   { key: 'atrust', title: 'aTrust 主链路（登录 → 资源 → 断开）', cmd: ['node', 'e2e_ui_test.js', '--scenario=atrust'], summary: 'suite-ui-atrust.json' },
 ];
 
+if (process.platform === 'linux') {
+  const nc=SUITES.find(s=>s.key==='v5vpn-nc');
+  nc.env={V5VPN_E2E_IPSEC_STATE:'up'};nc.summary='suite-ui-v5vpn-nc-up.json';
+  SUITES.splice(2,0,...['unavailable','error','authorization-cancelled'].map(mode=>({key:'v5vpn-nc-'+mode,title:'Linux NC '+mode,cmd:['node','e2e_ui_test.js','--scenario=v5vpn-nc'],summary:'suite-ui-v5vpn-nc-'+mode+'.json',env:{V5VPN_E2E_IPSEC_STATE:mode}})));
+}
+
 function log(msg) {
   const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
   console.log(`[${ts}] ${msg}`);
@@ -54,7 +60,7 @@ function runSuite(suite) {
     const proc = spawn(suite.cmd[0], suite.cmd.slice(1), {
       cwd: TEST_DIR,
       stdio: 'inherit',
-      env: { ...process.env },
+      env: { ...process.env, ...suite.env },
     });
     proc.on('close', (code) => {
       const ms = Date.now() - t0;

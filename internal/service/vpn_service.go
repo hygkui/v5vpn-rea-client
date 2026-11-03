@@ -100,7 +100,7 @@ type VPNService struct {
 	// exist so the connected view can say what was assigned instead of "0 resources".
 	IPsecResources []protocol.IPsecResource
 	// IPsec data-plane state, populated asynchronously after resources load.
-	ipsecMgr     *ipsec.Manager
+	ipsecMgr     ipsec.TunnelBackend
 	ipsecCfg     *ipsec.Config
 	ipsecGateway string
 	ipsecState   string // "", "starting", "up", "error", "unavailable"
@@ -108,7 +108,10 @@ type VPNService struct {
 	ipsecCancel  context.CancelFunc
 	// newIPsecManager builds the WSL Manager for a session. nil means
 	// ipsec.NewManager; tests substitute it to inject a fake CommandRunner.
-	newIPsecManager func(confPath string) *ipsec.Manager
+	newIPsecBackend func(confPath, peer string) ipsec.TunnelBackend
+	ipsecStartMu    sync.Mutex
+	ipsecGeneration uint64
+	ipsecPlatform   string
 	resourceState   ResourceLoadState
 	resourceError   string
 	Logs            []string
@@ -740,175 +743,214 @@ func (s *VPNService) loadResources(client *protocol.Client, cert *tls.Certificat
 		if len(resources) == 0 {
 			s.Log("INFO", "Gateway granted %d IPsec (NC) profile(s); starting the IPsec data plane", len(ipsecResources))
 		}
-		go s.startIPsec(integration.ResourceList.NCResources)
+		go s.startIPsecForClient(client, integration.ResourceList.NCResources)
 	}
 }
 
-// startIPsec builds the IKEv1 profile for this session and asks the Manager to
-// bring it up through WSL/strongSwan. Failures are recorded in ipsecState so
-// the UI can explain why the subnets are unreachable.
+// startIPsec is the test/internal facade. Production binds the NC result to
+// the exact authenticated client that fetched it.
 func (s *VPNService) startIPsec(ncs []protocol.NCResource) {
+	s.mu.Lock()
+	owner := s.Client
+	s.mu.Unlock()
+	s.startIPsecForClient(owner, ncs)
+}
+
+func (s *VPNService) startIPsecForClient(owner *protocol.Client, ncs []protocol.NCResource) {
+	s.ipsecStartMu.Lock()
+	defer s.ipsecStartMu.Unlock()
+	s.mu.Lock()
+	if s.Status != "Connected" || s.Client != owner {
+		s.mu.Unlock()
+		return
+	}
+	old, oldCfg := s.ipsecMgr, s.ipsecCfg
+	if s.ipsecCancel != nil {
+		s.ipsecCancel()
+	}
+	s.ipsecGeneration++
+	epoch := s.ipsecGeneration
+	life, cancelLife := context.WithCancel(context.Background())
+	s.ipsecCancel = cancelLife
+	s.ipsecMgr = nil
+	s.ipsecCfg = nil
+	s.ipsecGateway = ""
+	s.ipsecPlatform = ipsec.PlatformName()
+	s.ipsecState = "starting"
+	s.ipsecError = ""
+	factory := s.newIPsecBackend
+	peer := ""
+	if owner != nil {
+		peer = owner.GatewayIP
+	}
+	s.mu.Unlock()
+	if old != nil && oldCfg != nil {
+		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = old.Stop(cleanup, *oldCfg)
+		done()
+	}
+	active := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.Status == "Connected" && s.Client == owner && s.ipsecGeneration == epoch
+	}
+	set := func(state, msg string) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.Status != "Connected" || s.Client != owner || s.ipsecGeneration != epoch {
+			return false
+		}
+		s.ipsecState = state
+		s.ipsecError = msg
+		return true
+	}
 	cfg, err := ipsec.FromNC(ncs)
 	if err != nil {
-		s.setIPsecState("error", err.Error())
-		s.Log("ERROR", "IPsec 配置无效: %v", err)
+		set("error", err.Error())
+		cancelLife()
 		return
 	}
 	confDir := config.UserDataDir()
 	if confDir == "" {
-		s.setIPsecState("error", "用户数据目录不可用")
-		s.Log("ERROR", "IPsec 配置目录不可用")
+		set("error", "用户数据目录不可用")
+		cancelLife()
 		return
 	}
-
-	newMgr := s.newIPsecManager
-	if newMgr == nil {
-		newMgr = ipsec.NewManager
+	if factory == nil {
+		factory = ipsec.NewPlatformBackend
 	}
-	mgr := newMgr(filepath.Join(confDir, "ipsec.conf"))
-
+	mgr := factory(filepath.Join(confDir, "ipsec.conf"), peer)
 	s.mu.Lock()
-	if s.Status == "Disconnected" {
+	if s.Status != "Connected" || s.Client != owner || s.ipsecGeneration != epoch {
 		s.mu.Unlock()
+		cancelLife()
 		return
 	}
+	s.ipsecMgr = mgr
+	s.ipsecCfg = cfg
+	s.ipsecPlatform = mgr.Platform()
+	s.mu.Unlock()
+	start, done := context.WithTimeout(life, 90*time.Second)
+	failed := true
+	defer func() {
+		done()
+		if failed {
+			cancelLife()
+			cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stop()
+			_ = mgr.Stop(cleanup, *cfg)
+		}
+	}()
+	if err = mgr.Probe(start); err != nil {
+		if active() {
+			set("unavailable", err.Error())
+			s.Log("WARN", "IPsec 数据面不可用: %v", err)
+		}
+		return
+	}
+	result, err := mgr.Start(start, *cfg)
+	if !active() || life.Err() != nil {
+		return
+	}
+	if err != nil {
+		set("error", err.Error())
+		s.Log("ERROR", "IPsec 隧道建立失败: %v", err)
+		return
+	}
+	if mgr.Platform() == "linux" {
+		status, e := mgr.Status(start)
+		if e != nil || !status.Installed {
+			set("error", "原生 IPsec 隧道尚未就绪")
+			return
+		}
+	}
+	for _, warning := range result.Warnings {
+		s.Log("WARN", "%s", warning)
+	}
+	s.mu.Lock()
+	if s.ipsecGeneration == epoch {
+		s.ipsecGateway = result.Gateway
+	}
+	s.mu.Unlock()
+	if !set("up", "") {
+		return
+	}
+	failed = false
+	s.Log("SUCCESS", "IPsec 隧道已建立")
+	if mgr.Platform() == "linux" {
+		go s.monitorNativeIPsec(life, epoch, mgr)
+	}
+}
+
+func (s *VPNService) monitorNativeIPsec(ctx context.Context, epoch uint64, mgr ipsec.TunnelBackend) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	misses := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !s.pollNativeIPsec(ctx, epoch, mgr, &misses) {
+				return
+			}
+		}
+	}
+}
+func (s *VPNService) pollNativeIPsec(ctx context.Context, epoch uint64, mgr ipsec.TunnelBackend, misses *int) bool {
+	query, done := context.WithTimeout(ctx, 5*time.Second)
+	status, err := mgr.Status(query)
+	done()
+	if ctx.Err() != nil {
+		return false
+	}
+	if err == nil && status.Installed {
+		*misses = 0
+		return true
+	}
+	*misses++
+	if *misses < 2 {
+		return true
+	}
+	s.mu.Lock()
+	if s.ipsecGeneration != epoch || s.ipsecMgr != mgr {
+		s.mu.Unlock()
+		return false
+	}
+	cfg := s.ipsecCfg
+	s.ipsecState = "error"
+	s.ipsecError = "内网隧道已中断，请重新连接"
 	if s.ipsecCancel != nil {
 		s.ipsecCancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	s.ipsecCancel = cancel
-	s.ipsecMgr = mgr
-	s.ipsecCfg = cfg
-	s.ipsecGateway = ""
-	s.ipsecError = ""
-	s.ipsecState = "starting"
 	s.mu.Unlock()
-
-	defer func() {
-		cancel()
-		s.mu.Lock()
-		if s.ipsecMgr == mgr {
-			s.ipsecCancel = nil
-		}
-		s.mu.Unlock()
-	}()
-
-	if !mgr.Available(ctx) {
-		s.mu.Lock()
-		if s.Status == "Disconnected" || s.ipsecMgr != mgr || ctx.Err() != nil {
-			s.mu.Unlock()
-			return
-		}
-		msg := "WSL 发行版 v5vpn 不可用，请先运行 scripts/setup-ipsec-wsl.ps1"
-		s.ipsecState = "unavailable"
-		s.ipsecError = msg
-		s.mu.Unlock()
-		s.Log("WARN", "IPsec 数据面不可用: %s", msg)
-		return
+	cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
+	if cfg != nil {
+		_ = mgr.Stop(cleanup, *cfg)
 	}
-
-	s.Log("INFO", "正在通过 WSL/strongSwan 建立 IPsec 隧道到 %s ...", ipsec.FormatServerPort(*cfg))
-	out, err := mgr.Start(ctx, *cfg)
-
-	s.mu.Lock()
-	aborted := s.Status == "Disconnected" || s.ipsecMgr != mgr || ctx.Err() != nil
-	s.mu.Unlock()
-	if aborted {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		_ = mgr.Stop(cleanupCtx, *cfg)
-		return
-	}
-
-	if err != nil {
-		s.setIPsecState("error", err.Error())
-		s.Log("ERROR", "IPsec 隧道建立失败: %v", err)
-		if out != "" {
-			s.Log("DEBUG", "swanctl: %s", out)
-		}
-		return
-	}
-
-	gateway := ""
-	if ip, err := mgr.WSLIP(ctx, cfg.VirtualIP); err == nil {
-		gateway = ip
-	} else {
-		s.Log("WARN", "无法获取 WSL 地址，跳过 Windows 路由: %v", err)
-	}
-
-	s.mu.Lock()
-	if s.Status == "Disconnected" || s.ipsecMgr != mgr || ctx.Err() != nil {
-		s.mu.Unlock()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		_ = mgr.Stop(cleanupCtx, *cfg)
-		return
-	}
-	s.ipsecGateway = gateway
-	s.mu.Unlock()
-
-	if gateway != "" {
-		if err := ipsec.AddRoutes(ctx, cfg.Routes, gateway); err != nil {
-			if errors.Is(err, ipsec.ErrNotElevated) {
-				s.Log("WARN", "IPsec 隧道已建立，但当前进程不是管理员：Windows 应用暂时无法自动路由到内网（可手动添加路由，或从 WSL 内访问）")
-			} else {
-				s.Log("WARN", "添加 Windows 路由失败: %v", err)
-			}
-		} else {
-			s.Log("SUCCESS", "已为 IPsec 网段添加 Windows 路由（网关 %s）", gateway)
-		}
-	}
-
-	s.mu.Lock()
-	if s.Status == "Disconnected" || s.ipsecMgr != mgr || ctx.Err() != nil {
-		s.mu.Unlock()
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cleanupCancel()
-		if gateway != "" {
-			_ = ipsec.RemoveRoutes(cleanupCtx, cfg.Routes, gateway)
-		}
-		_ = mgr.Stop(cleanupCtx, *cfg)
-		return
-	}
-	s.ipsecState = "up"
-	s.ipsecError = ""
-	s.mu.Unlock()
-	s.Log("SUCCESS", "IPsec 隧道已建立: %s", ipsec.FormatServerPort(*cfg))
+	return false
 }
 
-func (s *VPNService) setIPsecState(state, errMsg string) {
-	s.mu.Lock()
-	s.ipsecState = state
-	s.ipsecError = errMsg
-	s.mu.Unlock()
-}
-
-// stopIPsec tears the tunnel down and removes the routes it added. It is safe
-// to call when no tunnel is running.
 func (s *VPNService) stopIPsec() {
 	s.mu.Lock()
+	s.ipsecGeneration++
 	if s.ipsecCancel != nil {
 		s.ipsecCancel()
 		s.ipsecCancel = nil
 	}
-	mgr := s.ipsecMgr
-	cfg := s.ipsecCfg
-	gateway := s.ipsecGateway
+	mgr, cfg := s.ipsecMgr, s.ipsecCfg
 	s.ipsecMgr = nil
 	s.ipsecCfg = nil
 	s.ipsecGateway = ""
 	s.ipsecState = ""
 	s.ipsecError = ""
 	s.mu.Unlock()
-
 	if mgr == nil || cfg == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if gateway != "" {
-		_ = ipsec.RemoveRoutes(ctx, cfg.Routes, gateway)
-	}
+	ctx, done := context.WithTimeout(context.Background(), 30*time.Second)
+	defer done()
 	if err := mgr.Stop(ctx, *cfg); err != nil {
 		s.Log("WARN", "停止 IPsec 隧道失败: %v", err)
 		return
@@ -1799,6 +1841,7 @@ func (s *VPNService) GetStatus() map[string]any {
 		"webResources":       s.WebResources,
 		"ipsecResources":     s.IPsecResources,
 		"ipsecState":         s.ipsecState,
+		"ipsecPlatform":      s.ipsecPlatform,
 		"ipsecError":         s.ipsecError,
 		"resourceState":      string(s.resourceState),
 		"resourceError":      s.resourceError,
