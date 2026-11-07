@@ -151,6 +151,59 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 - **必须以管理员身份运行客户端**：向 Windows 路由表执行 `route.exe add` 必须提权，非管理员时隧道虽然能在 WSL 内部建起，但宿主机应用流量无法流入；
 - **异常退出残留**：若客户端被任务管理器强制杀死，WSL 内的 iptables SNAT 规则与 Windows 路由表条目无法触发 `Stop()` 清理，需在重连时覆盖或手动排查。
 
+### 3.5 Linux 桌面原生数据面（方案 A' 已落地，PR #20）
+
+§5.2 决策第 3 条（信创 / Linux 桌面低成本补齐三层能力）已随 PR #20 实装：
+Linux 宿主机直接编排 strongSwan，不再依赖 WSL2。本节沉淀其设计决策与反面案例，
+细节以 `internal/ipsec` 为准。
+
+**后端抽象先行，服务层零分支**：服务层只依赖 `TunnelBackend` 接口
+（`internal/ipsec/backend.go`），平台工厂 `NewPlatformBackend` 按编译目标选择
+Windows（WSL2 Manager 包装）或 Linux 原生后端。E2E 的替身后端锁死在
+`ipsectest` 构建 tag（`backend_fixture_linux.go`），生产构建不存在可注入的
+替代提权路径——这是「测试替身不得进入生产二进制」的硬边界。
+
+**特权模型：按需授权，非常驻 daemon**。与方案 B 规划的常驻 Privileged Helper
+不同，当前落地是「每次连接、一次授权」：客户端以普通用户运行，连接时经
+`pkexec`（polkit `auth_admin`）拉起最小 helper（`cmd/ipsec-helper`）。helper
+只在 stdin/stdout 管道上接受 start/status/stop 三种操作：固定 PATH、协议版本
+钉死、JSON 请求拒绝未知字段、单会话生命周期（父进程 EOF 或取消必然触发特权
+清理）。客户端执行前逐级校验 helper 安装路径信任链——root 属主、无组/他者
+写位、全路径无符号链接（`helper_client_linux.go`）；安装脚本
+`scripts/setup-ipsec-linux.sh` 只落盘人工审查过的二进制，拒收符号链接与
+运行期残留目录。
+
+**数据面编排**：私有 charon 实例（独立 VICI socket 与 PID 文件），沿用 §3.3
+实网参数（IKEv1 主模式 / `aes192-sha1-modp1024` / 本地 UDP 1194 → 远端 1194）。
+受保护网段走策略路由表 186（`to <网段> lookup 186`，优先级 18600+i，网关自身
+走 18599 回主表）+ 源地址 VIP + iptables SNAT（先 `-d <网关>/32 RETURN` 豁免
+管控面流量，再逐网段 `--to-source <VIP>`，与 §3.2 同理）。断连由服务层每
+5 秒查询 Child SA，连续两轮缺失即判定中断并完整清理。
+
+**拒绝而非接管**：启动预检任何外来状态——系统既有 XFRM 对象、charon 进程与
+PID 文件、UDP 1194/4500 占用、路由表 186 与规则优先级段、iptables 链名、
+VIP 与本地地址冲突、出口网卡被 TUN/XFRM/WireGuard 接管——一律拒绝启动并
+给出缺口提示，绝不 flush、绝不改写他人的 IPsec 状态
+（`native_probe_linux.go`）。这与 Windows 端「检测到 WSL 缺失只降级不阻断」
+是同一原则的两面：不动不属于本次会话的东西。
+
+**残留可恢复**：每个网络变更前先写 undo 账本（`/run/v5vpn-native-ipsec/session.json`，
+root 私有 0600），被中断的变更按「精确属性对账」确认是否已生效；崩溃 / 强杀
+后重连时凭账本 + PID 启动时间识别遗留会话（防 PID 复用），逐条按原属性回收
+（永不 flush），最后要求 XFRM 为空才算干净；清理失败的现场被保留并拒绝下一次
+启动，人工核对后重试（`native_recovery_linux.go`）。对照 §3.4 已知限制第 2 条：
+WSL 路线的强杀残留靠「重连时覆盖」，Linux 路线升级为「账本对账 + 拒收脏现场」。
+守卫测试：`native_probe_linux_test.go`、`native_recovery_linux_test.go`、
+`helper_linux_test.go`、`helper_client_linux_test.go`。独立验证工具
+`cmd/ipsec-native-check` 可在 root 下对指定内网目标做「路由命中 VIP 表 +
+HTTP 可达 + 双向 ESP 计数增量」的端到端证明，避免把「SA 已装上」误当
+「内网已可达」。
+
+**已知限制**：依赖系统包管理器安装 strongSwan（非单二进制自包含，方案 B 的
+演进动机不变）；每次连接需一次管理员授权（polkit `auth_admin`，可用系统策略
+放宽为免密规则）；仅支持 IKEv1 主模式 + key_id（`FromNC` 对网关显式下发
+v2 / aggressive 等直接拒绝并提示，不静默降级）。
+
 ---
 
 ## 4. 怎么彻底解决问题？有哪几种方案与评估？
@@ -219,7 +272,7 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 | 方案 | 跨平台覆盖度 | 外部运行时依赖 | 特权需求与触发时机 | 驱动/内核安全影响 | 其他 TUN 软件冲突表现 | 定性评估与架构结论 |
 |:---|:---|:---|:---|:---|:---|:---|
 | **方案 A：WSL2 + strongSwan**<br/>*(当前落地)* | 仅 Windows | 强依赖 WSL2 虚拟机、Ubuntu 镜像、strongSwan 运行时 | 运行时需系统管理员权限（注入 Windows 路由） | 宿主机零专有驱动；流量经 Hyper-V 跨网络进入 WSL 内核 XFRM | 路由若被其他 TUN 覆盖，内网失联；**必须关闭其他 TUN** | **【当下现状 / Windows 过渡可用】**<br/>复用成熟工业级协议栈，现阶段在 Windows 上最稳妥可用；缺点是依赖重、需重启，非跨平台终极形态 |
-| **方案 A'：宿主机 strongSwan**<br/>*(单平台扩展)* | 仅 Linux | 依赖系统包管理器安装 strongSwan 软件包 | 需系统 `root` 或 `CAP_NET_ADMIN` | 宿主机零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | 依赖路由优先级调度；建议关闭其他全局 TUN | **【阶段可选 / 单平台低成本延伸】**<br/>仅适合信创/Linux 桌面快速补齐三层能力，开发成本极低；但无法单二进制分发，且无法解决 macOS |
+| **方案 A'：宿主机 strongSwan**<br/>*(单平台扩展，已落地)* | 仅 Linux | 依赖系统包管理器安装 strongSwan 软件包 | 每次连接经 polkit `auth_admin` 授权 helper 执行 | 宿主机零专有驱动；直接使用 Linux 原生 XFRM/Netfilter | 依赖路由优先级调度（表 186）；建议关闭其他全局 TUN | **【已落地 / Linux 单平台延伸（PR #20）】**<br/>信创/Linux 桌面三层能力已实装（§3.5）：pkexec 按需授权 helper + 私有 charon 编排 + undo 账本恢复；仍是系统包依赖、无法单二进制分发，macOS 仍需方案 B |
 | **方案 B：纯 Go 用户态 IPsec**<br/>*(终极目标)* | **Windows / macOS / Linux 三平台统一** | **零外部依赖**<br/>（纯 Go 单二进制自包含分发） | 建 TUN 网卡与改路由需特权（推荐 Privileged Helper 一次性安装） | Windows 引入通用轻量 `wintun.sys`（微软签名）；macOS/Linux 使用原生系统 TUN | 同样受三层路由抢占影响；客户端内置强提醒排查机制 | **【推荐 / 跨平台终极彻底解法】**<br/>真正达成三平台单二进制自包含分发，彻底摆脱 WSL2 与系统包依赖；虽需承担自研状态机维护责任，但是唯一正解 |
 | **方案 C：原厂 DLL 注入**<br/>*(逆向验证)* | 仅 Windows | 强依赖本机已安装的原厂客户端文件及环境 | 依原厂要求（通常需管理员） | 依然依赖原厂私有内核驱动（`SecTap.sys`），驱动冲突依然存在 | 与原厂客户端表现一致 | **【完全不可行 / 坚决废弃】**<br/>强行绑定原厂闭源环境与专有驱动，违背本项目「杜绝专有驱动冲突」的核心立项宗旨，且存在版权与分发风险 |
 | **方案 D：macOS 运行 strongSwan**<br/>*(跨平台尝试)* | 仅 macOS | 需移植 strongSwan charon + kernel-libipsec 动态库 | 创建 utun 接口需 `root` 权限 | 依赖 utun 接口 | 同样存在多 TUN 抢占 | **【完全不可行 / 架构死胡同】**<br/>macOS 系统框架仅支持 IKEv2，强行移植用户态 charon 成本严重倒挂，等同于手写 TUN 却额外背负庞大 C 依赖 |
@@ -228,6 +281,6 @@ dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
 
 1. **【当下现状】维持方案 A 保障 Windows 可用性**：Windows 端继续沿用 WSL2 + strongSwan 承载，实网已验证其稳定性；未安装 WSL 时优雅降级为 `unavailable` 并给出配置脚本提示，绝不阻断非 NC 资源的使用。
 2. **【彻底解决】演进主线锁定方案 B（纯 Go 用户态 IPsec）**：纯 Go 用户态实现是摆脱 WSL2 笨重依赖、实现 Windows/macOS/Linux 三平台单一自包含二进制分发的唯一正确路径。实施次序锁定为 **「mock 裁判先行 $\rightarrow$ 自研 IKEv1/ESP 核心 $\rightarrow$ Privileged Helper 落地 $\rightarrow$ 冲突诊断强提醒」**。
-3. **【阶段可选】Linux 信创场景可权衡采纳方案 A'**：若短期内需要低成本覆盖统信 UOS / 麒麟等国产 Linux 桌面，可优先以数人天成本实现宿主 strongSwan 编排（A'）作为阶段性过渡。
+3. **【已落地】Linux 信创场景采纳方案 A'（PR #20）**：宿主 strongSwan 编排（A'）已作为 Linux 桌面的阶段性落地实装——按需授权 helper、拒绝式预检与 undo 账本恢复见 §3.5；Windows 继续方案 A，跨平台单二进制的终局仍是方案 B。
 4. **【彻底否定】坚决废弃方案 C 与 macOS strongSwan 方案**：原厂 DLL 注入（方案 C）严重违背零驱动冲突原则；macOS strongSwan 路线因系统协议断层和架构倒挂，直接在技术选型中否决。
 5. **【操作底线】多 TUN 互斥与用户强提醒**：确立「要访问内网就不能同时开启其他 TUN 软件」的排他原则。在客户端连接诊断中内置活动网卡探测与内网连通性检测，排查到异常时明确向用户提示退出其他 TUN 软件。
