@@ -128,6 +128,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/vpn/user/auth/send_smc", s.handleSendSMS)
 	mux.HandleFunc("/vpn/user/auth/pwdchange", s.handlePwdChange)
 	mux.HandleFunc("/vpn/user/auth/verifycode", s.handleVerifyCode)
+	mux.HandleFunc("/vpn/user/common/verifycode.gif", s.handleVerifyCodeImage)
 	mux.HandleFunc("/vpn/user/auth/verifycode_status", s.handleVerifyCodeStatus)
 	mux.HandleFunc("/api/verifycode", s.handleAPIVerifyCode)
 	mux.HandleFunc("/api/smscode", s.handleAPISMCode)
@@ -1048,6 +1049,58 @@ func (s *Server) generateCaptchaImageBytes(code string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// handleVerifyCodeImage serves GET /vpn/user/common/verifycode.gif — the
+// picture route of the original portal driver (jquery.sslvpn.js
+// Route("verifycode")). The code is stored on the session carried by the
+// VSG_SESSIONID cookie and checked on login.
+func (s *Server) handleVerifyCodeImage(w http.ResponseWriter, r *http.Request) {
+	sessionCookie, err := r.Cookie("VSG_SESSIONID")
+	sessionID := ""
+	if err == nil {
+		sessionID = sessionCookie.Value
+	}
+
+	// Ensure the session exists, even when the caller presents a stale
+	// cookie; the code is stored on this session and checked on login.
+	newSession := false
+	s.mu.Lock()
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("mock-vc-sess-%d", time.Now().UnixNano())
+		newSession = true
+	}
+	if sess, ok := s.sessions[sessionID]; !ok || sess == nil {
+		s.sessions[sessionID] = &Session{
+			ID:        sessionID,
+			CreatedAt: time.Now(),
+		}
+		newSession = true
+	}
+	s.mu.Unlock()
+	if newSession {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "VSG_SESSIONID",
+			Value:    sessionID,
+			Path:     "/",
+			HttpOnly: true,
+		})
+	}
+
+	code := s.generateNewVerifyCode(sessionID)
+	log.Printf("[MockServer] <- Generating random captcha image for session %q (Code: %q)", sessionID, code)
+	imgBytes, err := s.generateCaptchaImageBytes(code)
+	if err != nil {
+		http.Error(w, "captcha generation failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Write(imgBytes)
+}
+
+// handleVerifyCode backs POST /vpn/user/auth/verifycode, the original
+// appliance's captcha precheck endpoint. A GET on it gets the captured
+// rejection XML (a production appliance answers code=0x80000050
+// 「验证码不能为空」) — the picture is only ever served from verifycode.gif.
 func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 	sessionCookie, err := r.Cookie("VSG_SESSIONID")
 	sessionID := ""
@@ -1055,42 +1108,10 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) {
 		sessionID = sessionCookie.Value
 	}
 
-	if r.Method == http.MethodGet {
-		// Ensure the session exists, even when the caller presents a stale
-		// cookie; the code is stored on this session and checked on login.
-		newSession := false
-		s.mu.Lock()
-		if sessionID == "" {
-			sessionID = fmt.Sprintf("mock-vc-sess-%d", time.Now().UnixNano())
-			newSession = true
-		}
-		if sess, ok := s.sessions[sessionID]; !ok || sess == nil {
-			s.sessions[sessionID] = &Session{
-				ID:        sessionID,
-				CreatedAt: time.Now(),
-			}
-			newSession = true
-		}
-		s.mu.Unlock()
-		if newSession {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "VSG_SESSIONID",
-				Value:    sessionID,
-				Path:     "/",
-				HttpOnly: true,
-			})
-		}
-
-		code := s.generateNewVerifyCode(sessionID)
-		log.Printf("[MockServer] <- Generating random captcha image for session %q (Code: %q)", sessionID, code)
-		imgBytes, err := s.generateCaptchaImageBytes(code)
-		if err != nil {
-			http.Error(w, "captcha generation failed", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Write(imgBytes)
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "text/xml")
+		_, _ = io.WriteString(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"+
+			"<RESPONSE>\n\t<RESULT code=\"0x80000050\" msg=\"验证码不能为空\" sid_name=\"VSG_SESSIONID\"/>\n</RESPONSE>")
 		return
 	}
 
@@ -1118,7 +1139,7 @@ func (s *Server) handleVerifyCodeStatus(w http.ResponseWriter, r *http.Request) 
 	log.Printf("[MockServer] -> GET /vpn/user/auth/verifycode_status")
 	w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 	w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
-<RESPONSE><RESULT status="1" len="4" url="/vpn/user/auth/verifycode"></RESULT></RESPONSE>`))
+<RESPONSE><RESULT status="1" len="4" url="/vpn/user/common/verifycode.gif"></RESULT></RESPONSE>`))
 }
 
 func (s *Server) handleAPIVerifyCode(w http.ResponseWriter, r *http.Request) {

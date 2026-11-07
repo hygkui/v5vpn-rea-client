@@ -422,7 +422,10 @@ func TestClearTLSClientCertificateRemovesInstalledCert(t *testing.T) {
 	if client.ClientCertificate() != nil {
 		t.Fatal("certificate survived ClearTLSClientCertificate")
 	}
-	tr := client.HTTPClient.Transport.(*http.Transport)
+	tr := transportOf(client.HTTPClient.Transport)
+	if tr == nil {
+		t.Fatal("transportOf failed to unwrap the client transport")
+	}
 	if len(tr.TLSClientConfig.Certificates) != 0 || tr.TLSClientConfig.GetClientCertificate != nil {
 		t.Fatal("TLS transport still offers the client certificate")
 	}

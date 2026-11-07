@@ -87,7 +87,7 @@ func NewClient(ip string, port int, algo int, logger func(string, string, ...any
 	}
 
 	httpClient := &http.Client{
-		Transport: tr,
+		Transport: &cookieFixTransport{base: tr},
 		Jar:       jar,
 		Timeout:   apiTimeout,
 	}
@@ -561,7 +561,8 @@ func (c *Client) AuthCertOnly(cert *tls.Certificate, verifycode string) error {
 // Caller holds c.mu.
 func (c *Client) installClientCertLocked(cert *tls.Certificate) {
 	c.tlsClientCert = cert
-	if tr, ok := c.HTTPClient.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+	tr := transportOf(c.HTTPClient.Transport)
+	if tr != nil && tr.TLSClientConfig != nil {
 		tr.TLSClientConfig.Certificates = []tls.Certificate{*cert}
 		tr.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return cert, nil
@@ -811,8 +812,8 @@ func (c *Client) ClearTLSClientCertificate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tlsClientCert = nil
-	tr, ok := c.HTTPClient.Transport.(*http.Transport)
-	if !ok || tr.TLSClientConfig == nil {
+	tr := transportOf(c.HTTPClient.Transport)
+	if tr == nil || tr.TLSClientConfig == nil {
 		return
 	}
 	tr.TLSClientConfig.Certificates = nil
@@ -975,11 +976,18 @@ func (c *Client) IsLoggedIn() bool {
 }
 
 // FetchVerifyCode fetches the graphic captcha image bytes and content type from the gateway.
+//
+// The picture lives on /vpn/user/common/verifycode.gif — the portal driver's
+// own route table (jquery.sslvpn.js: Route("verifycode")) fetches it there with
+// a cache-busting query. GET /vpn/user/auth/verifycode is a different endpoint
+// (the POST check's path): a production appliance answers that GET with the XML
+// rejection code=0x80000050「验证码不能为空」, which the old URL here happily
+// wrapped into a data URL the browser rendered as a broken-image glyph.
 func (c *Client) FetchVerifyCode() ([]byte, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	reqURL := fmt.Sprintf("%s/vpn/user/auth/verifycode?t=%d", c.BaseURL, time.Now().UnixNano())
+	reqURL := fmt.Sprintf("%s/vpn/user/common/verifycode.gif?t=%d", c.BaseURL, time.Now().UnixNano())
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, "", err
@@ -1001,12 +1009,20 @@ func (c *Client) FetchVerifyCode() ([]byte, string, error) {
 
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
-		contentType = "image/png"
+		contentType = "image/gif"
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("读取验证码数据失败: %w", err)
+	}
+
+	// A non-image answer is the gateway talking XML (challenge, misrouted
+	// check endpoint, session trouble) — surfacing it beats returning a data
+	// URL the <img> renders as a silent broken-image glyph.
+	if !strings.HasPrefix(contentType, "image/") {
+		c.Logger("ERROR", "Verifycode endpoint returned non-image content (%s): %.160s", contentType, string(data))
+		return nil, "", fmt.Errorf("验证码接口返回非图片内容 (%s)：%.160s", contentType, strings.TrimSpace(string(data)))
 	}
 
 	c.Logger("INFO", "Fetched verifycode image (%d bytes, %s)", len(data), contentType)

@@ -1,5 +1,30 @@
 # 更新日志
 
+## Unreleased
+
+Linux 原生 IPsec 数据面、Cookie 线上格式修复与验证码链路修正由 **@BaekElk19** 贡献
+（[PR #20](https://github.com/hygkui/v5vpn-rea-client/pull/20)）；NC 跨平台数据面的
+演进主线见 [#17](https://github.com/hygkui/v5vpn-rea-client/issues/17)。
+
+### Linux 原生 IPsec 数据面（方案 A' 落地）
+
+- 新增 Linux 原生后端：宿主机直接编排 strongSwan（swanctl IKEv1 主模式 + PSK），不再依赖 WSL2；与 Windows 共用 `TunnelBackend` 抽象，服务层零平台分支。
+- 新增提权 helper（`cmd/ipsec-helper`）：每次连接经 polkit `auth_admin` 按需授权；固定 PATH、单会话、操作白名单，客户端侧逐级校验 helper 安装路径信任链（root 属主、无组/他者写位、全路径无符号链接）。
+- 拒绝而非接管：启动预检外来 XFRM 对象、charon 进程、UDP 1194/4500 占用、路由表 186、iptables 链与 VIP 冲突，任何冲突直接拒绝，绝不影响系统既有 IPsec。
+- 异常残留可恢复：每步网络变更加 undo 账本（`session.json`），崩溃/强杀后凭账本 + PID 启动时间对账清理；清理失败保留现场并拒绝下一次启动。
+- 新增环境自检 `cmd/ipsec-native-check` 与一键配置 `scripts/setup-ipsec-linux.sh`；Linux 界面状态条按平台展示内网连接文案。
+- 设计决策沉淀至 `docs/ipsec.md`（§3.5 与 §5 方案 A' 行）。
+
+### Cookie 线上格式修复（含逗号 VSG_SESSIONID）
+
+- 修复部分网关下发的 `VSG_SESSIONID` 含逗号时，Go 标准库按 RFC 6265 给值加引号发送、网关（Java 门户）不解析引号导致登录后资源拉取与心跳全部超时：新增 `cookieFixTransport` 在传输层还原裸值，覆盖登录/取资源/心跳/登出全链路（`docs/protocol.md` §3）。
+- mock 网关用 Go 解析 Cookie 属宽松裁判，暴露不了该差异；线上格式由传输层守卫测试 `TestLoginSendsUnquotedCommaSessionCookie` 断言。
+
+### 验证码链路与认证分类修复
+
+- 图形验证码改走门户驱动的真实图片路由 `/vpn/user/common/verifycode.gif`（原 `/vpn/user/auth/verifycode` 是校验端点，实网 GET 会返回 XML 拒绝码并被渲染成裂图）；非图片响应显式报错并展示网关文案。
+- 收录实网抓取的「验证码不能为空」结果码 `0x80000050`；未收录结果码时按响应文案兜底分类（短信/令牌文案除外），保证验证码挑战能正常弹出模态。
+
 ## 0.6.0
 
 新增 V5VPN 的 NC/IPsec（Network Connect）数据面支持：当网关下发 `<NC_RESOURCE>`

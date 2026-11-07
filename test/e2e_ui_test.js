@@ -46,10 +46,12 @@ function parseArgs(argv) {
 }
 
 const ARGS = parseArgs(process.argv);
+const NC_MODE = process.env.V5VPN_E2E_IPSEC_STATE || 'up';
+const RUN_KEY = ARGS.scenario + (process.platform === 'linux' && ARGS.scenario === 'v5vpn-nc' ? '-' + NC_MODE : '');
 
 // REPORT_PATH 是本套件的单套报告；套件摘要（suite-*.json）供 e2e_run.js
 // 聚合成统一报告。
-const REPORT_PATH = path.join(RESULTS_DIR, `report-${ARGS.scenario}.html`);
+const REPORT_PATH = path.join(RESULTS_DIR, `report-${RUN_KEY}.html`);
 
 // 场景定义：协议、mock 包路径、网关表单值、期望在界面上看到的资源名。
 //
@@ -112,7 +114,7 @@ fs.mkdirSync(RESULTS_DIR, { recursive: true });
 const SCREENSHOTS_DIR = path.join(RESULTS_DIR, 'screenshots');
 fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 
-const LOG_FILE = path.join(RESULTS_DIR, `test-${ARGS.scenario}.log`);
+const LOG_FILE = path.join(RESULTS_DIR, `test-${RUN_KEY}.log`);
 fs.writeFileSync(LOG_FILE, `=== ${SCENARIO.name} UI E2E started at ${new Date().toISOString()} ===\n`);
 
 function log(msg) {
@@ -145,7 +147,7 @@ async function recordStep(page, { id, title, desc, screenshotName, action }) {
   }
 
   const durationMs = Date.now() - t0;
-  const file = path.join(SCREENSHOTS_DIR, `${ARGS.scenario}-${screenshotName}`);
+  const file = path.join(SCREENSHOTS_DIR, `${RUN_KEY}-${screenshotName}`);
   try {
     await page.screenshot({ path: file, fullPage: false });
   } catch {
@@ -387,7 +389,7 @@ function writeSuiteSummary() {
   };
   try {
     fs.writeFileSync(
-      path.join(RESULTS_DIR, `suite-ui-${ARGS.scenario}.json`),
+      path.join(RESULTS_DIR, `suite-ui-${RUN_KEY}.json`),
       JSON.stringify(summary, null, 2));
   } catch (err) {
     log(`写套件摘要失败: ${err.message}`);
@@ -671,7 +673,14 @@ async function assertNCView(page) {
     const el = document.getElementById('ipsec-status');
     return !!(el && el.offsetParent !== null && /IPsec/.test(el.textContent));
   }, { timeout: 15000 });
+  await page.waitForFunction(want => {const el=document.getElementById('ipsec-status');return el && el.classList.contains('ipsec-'+want);}, {timeout:15000}, status.ipsecState);
   const barText = (await page.$eval('#ipsec-status', el => el.textContent.trim()));
+  if (process.platform === 'linux') {
+    if (/WSL|Windows/.test(barText) || status.ipsecPlatform !== 'linux') throw new Error('Linux 状态条仍包含 Windows/WSL 指引');
+    const expected = NC_MODE === 'up' ? 'up' : NC_MODE === 'unavailable' ? 'unavailable' : 'error';
+    if (status.ipsecState !== expected) throw new Error('Linux NC 状态未按场景呈现');
+    if (NC_MODE === 'authorization-cancelled' && !barText.includes('授权')) throw new Error('授权取消没有明确提示');
+  }
 
   // 资源表 NC 分支：0 TCP/UDP 时的说明文案 + 已下发隧道列表。
   const tableText = await page.$eval('#resources-tbody', tb => tb.textContent);

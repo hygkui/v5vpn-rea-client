@@ -1786,15 +1786,17 @@
     lastIPsecError = (st && st.ipsecError) || '';
     const tunnels = ipsec.flatMap(p => p.tunnels || []);
     const names = tunnels.map(t => t.name).filter(Boolean).join('、') || 'NC';
+    const native = st && st.ipsecPlatform === 'linux';
+    el.setAttribute('aria-busy', String(lastIPsecState === 'starting'));
     let msg;
     if (lastIPsecState === 'up') {
-      msg = `IPsec 隧道已建立：${names}。Windows 应用若无法访问内网，请以管理员权限运行客户端（自动添加路由），或手动添加路由。`;
+      msg = native ? `IPsec 内网连接已就绪：${names}。现在可直接访问内网资源。` : `IPsec 隧道已建立：${names}。Windows 应用若无法访问内网，请以管理员权限运行客户端（自动添加路由），或手动添加路由。`;
     } else if (lastIPsecState === 'starting') {
-      msg = `正在通过 WSL/strongSwan 建立 IPsec 隧道（${names}）...`;
+      msg = native ? `正在建立 IPsec 内网连接（${names}）；若出现系统授权窗口，请完成授权。` : `正在通过 WSL/strongSwan 建立 IPsec 隧道（${names}）...`;
     } else if (lastIPsecState === 'error') {
       msg = `IPsec 隧道建立失败：${lastIPsecError || '未知错误'}`;
     } else if (lastIPsecState === 'unavailable') {
-      msg = `IPsec 数据面不可用：${lastIPsecError || 'WSL 发行版未安装'}`;
+      msg = `IPsec 数据面不可用：${lastIPsecError || (native ? 'Linux 内网连接环境尚未准备' : 'WSL 发行版未安装')}`;
     } else {
       msg = `网关下发了 IPsec 隧道（${names}），等待建立。`;
     }

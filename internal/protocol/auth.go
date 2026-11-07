@@ -60,6 +60,13 @@ const (
 	codeVerifyCode         = 0x66600011
 	codeVerifyCodeAlt      = 0x80
 	codeVerifyCodeMismatch = 0x80000021
+	// codeVerifyCodeEmpty was captured on a production appliance: the password
+	// step rejects a captcha-less login with it (msg 验证码不能为空, sid_name
+	// VSG_SESSIONID), and so does GET /vpn/user/auth/verifycode — the check
+	// endpoint the old build mistakenly used as the picture URL. The message
+	// fallback in classifyAuthByMsg would catch it anyway; listing the
+	// captured code keeps the classification precise when msg varies.
+	codeVerifyCodeEmpty = 0x80000050
 
 	// Certificate authentication results.
 	codeCertVerifyFailed = 0x103 // TAG 259 证书验证失败
@@ -220,17 +227,17 @@ func newAuthError(code, msg string) *AuthError {
 	}
 }
 
-func classifyAuth(code, _ string) AuthKind {
+func classifyAuth(code, msg string) AuthKind {
 	n, ok := parseResultCode(code)
 	if !ok {
-		return AuthKindOther
+		return classifyAuthByMsg(msg)
 	}
 	switch n {
 	case codePasswordExpired:
 		return AuthKindPasswordExpired
 	case codeBadCredentials, codeDecryptFailed:
 		return AuthKindBadCredentials
-	case codeVerifyCode, codeVerifyCodeAlt, codeVerifyCodeMismatch:
+	case codeVerifyCode, codeVerifyCodeAlt, codeVerifyCodeMismatch, codeVerifyCodeEmpty:
 		return AuthKindVerifyCode
 	case codeCertVerifyFailed, codeCertFailed:
 		return AuthKindCertInvalid
@@ -251,8 +258,23 @@ func classifyAuth(code, _ string) AuthKind {
 	case codeTokenCodeError:
 		return AuthKindTokenCodeError
 	default:
-		return AuthKindOther
+		return classifyAuthByMsg(msg)
 	}
+}
+
+// classifyAuthByMsg 是结果码缺位时的文案兜底。野外网关并不都发上表收录的
+// 三个验证码码值：有网关对空验证码回一个未收录的结果码，msg 只有一句
+// 「验证码不能为空」。按码判定落到 default 后，挑战会被降级成普通报错，
+// 界面永远等不到验证码模态，用户只看到一句网关文案。此时「验证码」三字
+// 是响应里唯一稳定的线索。短信与动态令牌的挑战文案同样含它（短信验证码 /
+// 动态令牌验证码），先排除再判定；已知结果码永远不走这里（code wins），
+// 兜底只救未收录码与解析失败的响应。
+func classifyAuthByMsg(msg string) AuthKind {
+	if strings.Contains(msg, "验证码") &&
+		!strings.Contains(msg, "短信") && !strings.Contains(msg, "令牌") {
+		return AuthKindVerifyCode
+	}
+	return AuthKindOther
 }
 
 // AuthStep is the factor a gateway asks for next. The masks mirror the portal
