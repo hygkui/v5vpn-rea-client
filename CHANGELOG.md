@@ -1,6 +1,6 @@
 # 更新日志
 
-## Unreleased
+## 0.7.0
 
 Linux 原生 IPsec 数据面、Cookie 线上格式修复与验证码链路修正由 **@BaekElk19** 贡献
 （[PR #20](https://github.com/hygkui/v5vpn-rea-client/pull/20)）；NC 跨平台数据面的
