@@ -1,9 +1,10 @@
 # IPsec（NC 资源）支持现状与实现路径
 
-本文系统阐明 V5VPN 网关下发 `<NC_RESOURCE>`（Network Connect 全网状三层隧道）时的业务目标、技术痛点、当前 Windows 落地现状，以及跨平台统一的备选方案评估与演进代价。
+本文系统阐明 V5VPN 网关下发 `<NC_RESOURCE>`（Network Connect 全网状三层隧道）时的业务目标、技术痛点、**Windows（WSL2）与 Linux（宿主 strongSwan，PR #20）数据面现状**，以及跨平台演进方案评估。
+
+> **当前能力摘要**：`internal/ipsec.NewPlatformBackend` 按平台选择后端——**Windows** 用 WSL2 + strongSwan（§3），**Linux** 用宿主原生编排 + `pkexec` helper（§3.5）；**macOS** 尚无 NC 数据面。未配置环境时 `ipsecState=unavailable`，不影响 TCP/UDP 应用资源。
 
 ---
-
 ## 1. 这个是要干啥？（目标与背景）
 
 在 V5VPN 体系中，网关给客户端下发的内网访问策略分为两类：
